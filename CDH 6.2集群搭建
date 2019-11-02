@@ -1,0 +1,30 @@
+1. 卸载Cloudera Manager
+如果因为其他原因，需要卸载Cloudera Manager，在各节点执行如下步骤即可。
+
+systemctl stop cloudera-scm-server
+systemctl stop cloudera-scm-agent
+yum -y remove 'cloudera-manager-*'
+
+yum clean all
+umount cm_processes
+umount /var/run/cloudera-scm-agent/process
+
+rm -Rf /usr/share/cmf /var/lib/cloudera* /var/cache/yum/cloudera* /var/log/cloudera* /var/run/cloudera*
+rm -rf /tmp/.scmpreparenode.lock
+rm -Rf /var/lib/flume-ng /var/lib/hadoop* /var/lib/hue /var/lib/navigator /var/lib/oozie /var/lib/solr /var/lib/sqoop* /var/lib/zookeeper
+rm -Rf datadrivepath/dfs datadrivepath/mapred datadrivepath/yarn
+
+rm -rf /var/lib/hadoop-* /var/lib/impala /var/lib/solr /var/lib/zookeeper /var/lib/hue /var/lib/oozie  /var/lib/pgsql  /var/lib/sqoop2  /data/dfs/  /data/impala/ /data/yarn/  /dfs/ /impala/ /yarn/  /var/run/hadoop-*/ /var/run/hdfs-*/ /usr/bin/hadoop* /usr/bin/zookeeper* /usr/bin/hbase* /usr/bin/hive* /usr/bin/hdfs /usr/bin/mapred /usr/bin/yarn /usr/bin/sqoop* /usr/bin/oozie /etc/hadoop* /etc/zookeeper* /etc/hive* /etc/hue /etc/impala /etc/sqoop* /etc/oozie /etc/hbase* /etc/hcatalog
+
+systemctl stop mariadb
+yum -y remove mariadb-*
+rm -rf /var/lib/mysql
+rm -rf /var/log/mysqld.log
+rm -rf /usr/lib64/mysql
+rm -rf /usr/share/mysql
+rm -rf /opt/cloudera
+
+安装参考博客：
+1. Centos7安装大数据平台CDH 6.2：https://xuchao918.github.io/2019/05/31/Centos7%E5%AE%89%E8%A3%85%E5%A4%A7%E6%95%B0%E6%8D%AE%E5%B9%B3%E5%8F%B0CDH-6-2/
+2. CDH6.0.0详细安装教程及所遇到的问题： https://blog.51cto.com/pizibaidu/2174297
+3. CDH构建大数据平台-使用自建的镜像地址安装Cloudera Manager： https://www.cnblogs.com/yinzhengjie/p/10413793.html
