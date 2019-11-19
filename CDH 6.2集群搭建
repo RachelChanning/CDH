@@ -25,6 +25,7 @@ rm -rf /usr/share/mysql
 rm -rf /opt/cloudera
 
 安装参考博客：
+新增加安装博客地址：https://anjia0532.github.io/2019/04/25/cdh-6-2-x/
 1. Centos7安装大数据平台CDH 6.2：https://xuchao918.github.io/2019/05/31/Centos7%E5%AE%89%E8%A3%85%E5%A4%A7%E6%95%B0%E6%8D%AE%E5%B9%B3%E5%8F%B0CDH-6-2/
 2. CDH6.0.0详细安装教程及所遇到的问题： https://blog.51cto.com/pizibaidu/2174297
 3. CDH构建大数据平台-使用自建的镜像地址安装Cloudera Manager： https://www.cnblogs.com/yinzhengjie/p/10413793.html
