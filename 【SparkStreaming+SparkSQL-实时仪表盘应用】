@@ -1,0 +1,3203 @@
+Spark-2.3.2【SparkStreaming+SparkSQL-实时仪表盘应用】
+ 应用场景：实时仪表盘（即大屏），每个集团下有多个mall，每个mall下包含多家shop，需实时计算集团下各mall及其shop的实时销售分析（区域、业态、店铺TOP、总销售额等指标）并提供可视化展现，之前时候一直在Strom实现，现在改为Spark2.3.2实现。
+
+ 
+
+1、数据源：首先数据源来自于MQ、Socket、Flume和DFS等，一般Kafka、RocketMQ等居多，此处示例代码用的是RocketMQ；
+
+2、实时计算框架：Storm（实时计算，Spout发射Tuple到各个Bolt，来一条即处理一条，一百毫秒以内的延迟）、SparkStreaming（准实时计算，基于微批次的实时计算，即一定时间段内的micro batch，每个micro batch的结构为DStream，底层是RDD）；
+
+3、此处Spark Streaming准实时处理应用流程：1、RocketMQ --> 2、SparkStreaming --> 3、SparkSQL（Parquet） --> 4、Redis（大屏使用） && HDFS（Hive数仓ODS层，ODS->DW[DWD-DWS]-DM）；
+
+4、系统设计
+
+
+
+ 
+
+5、代码如下（4.3是Spark Streaming实现，复制粘贴即可运行）：
+
+5.1、RocketMQConfig类（用于配置和构建MQ消费者）
+5.2、SparkStreaming自定义RocketMQ接收器（可靠的接收器）
+5.3、SparkStreaming销售分析实时计算
+5.4、账单实体类
+5.5、BCD即账单裁剪后的实体类（减少数据量传输即降低节点间的序列化和反序列化开销）
+5.6、SparkSQL销售分析业务实现类
+5.1、RocketMQConfig类（用于配置和构建MQ消费者）
+
+复制代码
+package com.mengyao.graph.etl.apps.commons.datasource.mq.receiver;
+
+import org.apache.commons.lang.Validate;
+import org.apache.rocketmq.client.ClientConfig;
+import org.apache.rocketmq.client.consumer.DefaultMQPushConsumer;
+import org.apache.rocketmq.client.exception.MQClientException;
+import org.apache.rocketmq.common.consumer.ConsumeFromWhere;
+import org.apache.rocketmq.remoting.common.RemotingUtil;
+
+import java.util.HashMap;
+import java.util.UUID;
+
+/**
+ * RocketMQConfig for Consumer
+ * @author mengyao
+ * 
+ */
+public class RocketMQConfig {
+    
+    // ------- the following is for common usage -------
+    /**
+     * RocketMq name server address
+     */
+    public static final String NAME_SERVER_ADDR = "nameserver.addr"; // Required
+
+    public static final String CLIENT_NAME = "client.name";
+
+    public static final String CLIENT_IP = "client.ip";
+    public static final String DEFAULT_CLIENT_IP = RemotingUtil.getLocalAddress();
+
+    public static final String CLIENT_CALLBACK_EXECUTOR_THREADS = "client.callback.executor.threads";
+    public static final int DEFAULT_CLIENT_CALLBACK_EXECUTOR_THREADS = Runtime.getRuntime().availableProcessors();;
+
+    public static final String NAME_SERVER_POLL_INTERVAL = "nameserver.poll.interval";
+    public static final int DEFAULT_NAME_SERVER_POLL_INTERVAL = 30000; // 30 seconds
+
+    public static final String BROKER_HEART_BEAT_INTERVAL = "brokerserver.heartbeat.interval";
+    public static final int DEFAULT_BROKER_HEART_BEAT_INTERVAL = 30000; // 30 seconds
+
+
+    // ------- the following is for push consumer mode -------
+    /**
+     * RocketMq consumer group
+      */
+    public static final String CONSUMER_GROUP = "consumer.group"; // Required
+
+    /**
+     * RocketMq consumer topic
+     */
+    public static final String CONSUMER_TOPIC = "consumer.topic"; // Required
+
+    public static final String CONSUMER_TAG = "consumer.tag";
+    public static final String DEFAULT_TAG = "*";
+
+    public static final String CONSUMER_OFFSET_RESET_TO = "consumer.offset.reset.to";
+    public static final String CONSUMER_OFFSET_LATEST = "latest";
+    public static final String CONSUMER_OFFSET_EARLIEST = "earliest";
+    public static final String CONSUMER_OFFSET_TIMESTAMP = "timestamp";
+
+    public static final String CONSUMER_MESSAGES_ORDERLY = "consumer.messages.orderly";
+
+    public static final String CONSUMER_OFFSET_PERSIST_INTERVAL = "consumer.offset.persist.interval";
+    public static final int DEFAULT_CONSUMER_OFFSET_PERSIST_INTERVAL = 5000; // 5 seconds
+
+    public static final String CONSUMER_MIN_THREADS = "consumer.min.threads";
+    public static final int DEFAULT_CONSUMER_MIN_THREADS = 20;
+
+    public static final String CONSUMER_MAX_THREADS = "consumer.max.threads";
+    public static final int DEFAULT_CONSUMER_MAX_THREADS = 64;
+
+
+    // ------- the following is for reliable Receiver -------
+    public static final String QUEUE_SIZE = "spout.queue.size";
+    public static final int DEFAULT_QUEUE_SIZE = 500;
+
+    public static final String MESSAGES_MAX_RETRY = "spout.messages.max.retry";
+    public static final int DEFAULT_MESSAGES_MAX_RETRY = 3;
+
+    public static final String MESSAGES_TTL = "spout.messages.ttl";
+    public static final int DEFAULT_MESSAGES_TTL = 300000;  // 5min
+
+
+    // ------- the following is for pull consumer mode -------
+
+    /**
+     * Maximum rate (number of records per second) at which data will be read from each RocketMq partition ,
+     * and the default value is "-1", it means consumer can pull message from rocketmq as fast as the consumer can.
+     * Other that, you also enables or disables Spark Streaming's internal backpressure mechanism by the config
+     *  "spark.streaming.backpressure.enabled".
+     */
+    public static final String  MAX_PULL_SPEED_PER_PARTITION = "pull.max.speed.per.partition";
+
+    /**
+     * To pick up the consume speed, the consumer can pull a batch of messages at a time. And the default
+     * value is "32"
+     */
+    public static final String PULL_MAX_BATCH_SIZE = "pull.max.batch.size";
+
+    /**
+     * pull timeout for the consumer, and the default time is "3000".
+     */
+    public static final String PULL_TIMEOUT_MS = "pull.timeout.ms";
+
+    // the following configs for consumer cache
+    public static final String PULL_CONSUMER_CACHE_INIT_CAPACITY = "pull.consumer.cache.initialCapacity";
+    public static final String PULL_CONSUMER_CACHE_MAX_CAPACITY = "pull.consumer.cache.maxCapacity";
+    public static final String PULL_CONSUMER_CACHE_LOAD_FACTOR = "pull.consumer.cache.loadFactor";
+
+
+    public static void buildConsumerConfigs(HashMap<String, String> props, DefaultMQPushConsumer consumer) {
+        buildCommonConfigs(props, consumer);
+
+        String group = props.get(CONSUMER_GROUP);
+        Validate.notEmpty(group);
+        consumer.setConsumerGroup(group);
+
+        consumer.setPersistConsumerOffsetInterval(getInteger(props,
+                CONSUMER_OFFSET_PERSIST_INTERVAL, DEFAULT_CONSUMER_OFFSET_PERSIST_INTERVAL));
+        consumer.setConsumeThreadMin(getInteger(props,
+                CONSUMER_MIN_THREADS, DEFAULT_CONSUMER_MIN_THREADS));
+        consumer.setConsumeThreadMax(getInteger(props,
+                CONSUMER_MAX_THREADS, DEFAULT_CONSUMER_MAX_THREADS));
+
+        String initOffset = props.get(CONSUMER_OFFSET_RESET_TO) != null ? props.get(CONSUMER_OFFSET_RESET_TO) : CONSUMER_OFFSET_LATEST;
+        switch (initOffset) {
+            case CONSUMER_OFFSET_EARLIEST:
+                consumer.setConsumeFromWhere(ConsumeFromWhere.CONSUME_FROM_FIRST_OFFSET);
+                break;
+            case CONSUMER_OFFSET_LATEST:
+                consumer.setConsumeFromWhere(ConsumeFromWhere.CONSUME_FROM_LAST_OFFSET);
+                break;
+            case CONSUMER_OFFSET_TIMESTAMP:
+                consumer.setConsumeTimestamp(initOffset);
+                break;
+            default:
+                consumer.setConsumeFromWhere(ConsumeFromWhere.CONSUME_FROM_LAST_OFFSET);
+        }
+
+        String topic = props.get(CONSUMER_TOPIC);
+        Validate.notEmpty(topic);
+        try {
+            consumer.subscribe(topic, props.get(CONSUMER_TAG) != null ? props.get(CONSUMER_TAG) : DEFAULT_TAG);
+        } catch (MQClientException e) {
+            throw new IllegalArgumentException(e);
+        }
+    }
+
+    public static void buildCommonConfigs(HashMap<String, String> props, ClientConfig client) {
+        String namesvr = props.get(NAME_SERVER_ADDR);
+        Validate.notEmpty(namesvr);
+        client.setNamesrvAddr(namesvr);
+
+        client.setClientIP(props.get(CLIENT_IP) != null ? props.get(CLIENT_IP) : DEFAULT_CLIENT_IP);
+        // use UUID for client name by default
+        String defaultClientName = UUID.randomUUID().toString();
+        client.setInstanceName(props.get(CLIENT_NAME) != null ? props.get(CLIENT_NAME) : defaultClientName);
+
+        client.setClientCallbackExecutorThreads(getInteger(props,
+                CLIENT_CALLBACK_EXECUTOR_THREADS, DEFAULT_CLIENT_CALLBACK_EXECUTOR_THREADS));
+        client.setPollNameServerInterval(getInteger(props,
+                NAME_SERVER_POLL_INTERVAL, DEFAULT_NAME_SERVER_POLL_INTERVAL));
+        client.setHeartbeatBrokerInterval(getInteger(props,
+                BROKER_HEART_BEAT_INTERVAL, DEFAULT_BROKER_HEART_BEAT_INTERVAL));
+    }
+
+    public static int getInteger(HashMap<String, String> props, String key, int defaultValue) {
+        return Integer.parseInt(props.get(key) != null ? props.get(key) : String.valueOf(defaultValue));
+    }
+
+    public static boolean getBoolean(HashMap<String, String> props, String key, boolean defaultValue) {
+        return Boolean.parseBoolean(props.get(key) != null ? props.get(key) : String.valueOf(defaultValue));
+    }
+
+}
+复制代码
+4.2、SparkStreaming自定义RocketMQ接收器（可靠的接收器）
+
+复制代码
+package com.mengyao.graph.etl.apps.commons.datasource.mq.receiver;
+
+import org.apache.activemq.util.ByteArrayInputStream;
+import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang.Validate;
+//import org.apache.commons.lang3.SerializationUtils;
+import org.apache.rocketmq.client.consumer.DefaultMQPushConsumer;
+import org.apache.rocketmq.client.consumer.MQPushConsumer;
+import org.apache.rocketmq.client.consumer.listener.ConsumeConcurrentlyContext;
+import org.apache.rocketmq.client.consumer.listener.ConsumeConcurrentlyStatus;
+import org.apache.rocketmq.client.consumer.listener.ConsumeOrderlyContext;
+import org.apache.rocketmq.client.consumer.listener.ConsumeOrderlyStatus;
+import org.apache.rocketmq.client.consumer.listener.MessageListenerConcurrently;
+import org.apache.rocketmq.client.consumer.listener.MessageListenerOrderly;
+import org.apache.rocketmq.client.exception.MQClientException;
+import org.apache.rocketmq.common.message.MessageExt;
+import org.apache.spark.storage.StorageLevel;
+import org.apache.spark.streaming.receiver.Receiver;
+
+import com.gooagoo.entity.mq.bill.MQBillMessage;
+import com.mengyao.graph.etl.apps.commons.beans.ods.fmt.BillInfoFmt;
+import com.mengyao.graph.etl.apps.commons.beans.ods.fmt.ConvertTool;
+import com.mengyao.graph.etl.apps.dashboard.beans.BCD;
+
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.util.HashMap;
+import java.util.List;
+
+/**
+ * RocketMQ Receiver
+ * @author mengyao
+ *
+ */
+public class RocketMQReceiver extends Receiver<BCD> {
+    
+    /**
+     * 
+     */
+    private static final long serialVersionUID = 2274826339951693341L;
+    private MQPushConsumer consumer;
+    private boolean ordered;
+    private HashMap<String, String> conf;
+    
+
+    public RocketMQReceiver(HashMap<String, String> conf, StorageLevel storageLevel) {
+        super(storageLevel);
+        this.conf = conf;
+    }
+
+    @Override
+    public void onStart() {
+        Validate.notEmpty(conf, "Consumer properties can not be empty");
+        ordered = RocketMQConfig.getBoolean(conf, RocketMQConfig.CONSUMER_MESSAGES_ORDERLY, true);
+        consumer = new DefaultMQPushConsumer();
+        RocketMQConfig.buildConsumerConfigs(conf, (DefaultMQPushConsumer)consumer);
+        if (ordered) {
+            consumer.registerMessageListener(new MessageListenerOrderly() {
+                @Override
+                public ConsumeOrderlyStatus consumeMessage(List<MessageExt> msgs, ConsumeOrderlyContext context) {
+                    if (process(msgs)) {
+                        return ConsumeOrderlyStatus.SUCCESS;
+                    } else {
+                        return ConsumeOrderlyStatus.SUSPEND_CURRENT_QUEUE_A_MOMENT;
+                    }
+                }
+            });
+        } else {
+            consumer.registerMessageListener(new MessageListenerConcurrently() {
+                @Override
+                public ConsumeConcurrentlyStatus consumeMessage(List<MessageExt> msgs, ConsumeConcurrentlyContext context) {
+                    if (process(msgs)) {
+                        return ConsumeConcurrentlyStatus.CONSUME_SUCCESS;
+                    } else {
+                        return ConsumeConcurrentlyStatus.RECONSUME_LATER;
+                    }
+                }
+            });
+        }
+        try {
+            consumer.start();
+            System.out.println("==== RocketMQReceiver start ====");
+        } catch (MQClientException e) {
+            e.printStackTrace();
+            throw new RuntimeException(e);
+        }
+    }
+
+    public boolean process(List<MessageExt> msgs) {
+        if (msgs.isEmpty()) {
+            System.out.println("==== Msgs is null! ====");
+            return true;
+        }
+        System.out.println("==== receiver msgs: "+msgs.size()+" record. ====");
+        try {
+            for (MessageExt messageExt : msgs) {
+                //MQBillMessage message = SerializationUtils.deserialize(messageExt.getBody());
+                MQBillMessage message = deserialize(messageExt.getBody());
+                if (null != message) {
+                    BillInfoFmt billFmt = ConvertTool.convertGagBillToOdsBillFmt(message.getData());
+                    if (validBillType(billFmt)) {
+　　　　　　　　　　　　　　 /**
+　　　　　　　　　　　　　　　 * this.store(BCD) 简单的接收一条存储一条，缺点是没有确认机制，不具备容错保证，会出现数据丢失。优点则是效率更高。
+　　　　　　　　　　　　　　　 * this.store(Iterator<BCD>)阻塞调用，当接收到的记录都存储到Spark后才会确认成功，当接收方采用复制（默认存储级别为复制）则在复制完成后确认成功，但在缓冲中的数据不被保证，会被重新发送。具备容错保证，可确保数据0丢失。
+　　　　　　　　　　　　　　　 */
+                        this.store(new BCD(billFmt.getId(), billFmt.getReceivableAmount(), billFmt.getSaleTime(), billFmt.getBillType(), billFmt.getShopId(), billFmt.getShopEntityId()));
+                    }
+                    billFmt=null;
+                    message.setData(null);
+                    message = null;
+                } else {
+                    System.out.println("==== receiver msg is:"+messageExt.getBody()+", deserialize faild. ====");
+                }
+            }
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * 验证账单类型是否为1、3、6
+     * @param bean
+     * @return
+     */
+    static boolean validBillType(BillInfoFmt bean) {
+        if (null == bean) {
+            System.out.println("==== BillBean is null! ====");
+            return false;
+        }
+        String billType = bean.getBillType();
+        if (StringUtils.isEmpty(billType)) {
+            System.out.println("==== BillBean.billType is null! ====");
+            return false;
+        }
+        String billTypeTrim = billType.trim();
+        return billTypeTrim.equals("1") || billType.equals("3") || billType.equals("6");
+    }
+    
+    @Override
+    public void onStop() {
+        consumer.shutdown();
+        System.out.println("==== RocketMQReceiver stop ====");
+    }
+    
+    private static MQBillMessage deserialize(byte[] body) throws Exception {
+        if (body == null) {
+            throw new IllegalArgumentException("The byte array must not be null");
+        }
+        MQBillMessage message = null;
+        ObjectInputStream in = null;
+        ByteArrayInputStream bais = null;
+        try {
+            bais = new ByteArrayInputStream(body);
+            in = new ObjectInputStream(bais);
+            message = (MQBillMessage) in.readObject();
+        } catch (final ClassNotFoundException ex) {
+            ex.printStackTrace();
+            throw ex;
+        } catch (final IOException ex) {
+            ex.printStackTrace();
+            throw ex;
+        } finally {
+            try {
+                if (bais != null) {
+                    bais.close();
+                }
+                if (in != null) {
+                    in.close();
+                }
+            } catch (final IOException ex) {
+                // ignore close exception
+            }
+        }
+        return message;
+    }
+
+}
+复制代码
+ 
+
+4.3、SparkStreaming销售分析实时计
+
+复制代码
+package com.mengyao.graph.etl.apps.commons.datasource.bill;
+
+import java.io.IOException;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import org.apache.commons.lang.Validate;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.spark.SparkConf;
+import org.apache.spark.api.java.JavaRDD;
+import org.apache.spark.api.java.JavaSparkContext;
+import org.apache.spark.api.java.StorageLevels;
+import org.apache.spark.api.java.function.Function0;
+import org.apache.spark.broadcast.Broadcast;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SaveMode;
+import org.apache.spark.sql.SparkSession;
+import org.apache.spark.streaming.Durations;
+import org.apache.spark.streaming.api.java.JavaReceiverInputDStream;
+import org.apache.spark.streaming.api.java.JavaStreamingContext;
+import org.apache.spark.util.LongAccumulator;
+import org.apache.spark.util.SizeEstimator;
+import org.apache.spark.streaming.Time;
+
+import com.mengyao.graph.etl.apps.commons.beans.dim.RuianMall;
+import com.mengyao.graph.etl.apps.commons.datasource.mq.receiver.RocketMQConfig;
+import com.mengyao.graph.etl.apps.commons.datasource.mq.receiver.RocketMQReceiver;
+import com.mengyao.graph.etl.apps.dashboard.beans.BCD;
+import com.mengyao.graph.etl.apps.dashboard.service.SaleAnalysisService;
+
+/**
+ * BillConsumer 大屏实时计算
+ *         1、hdfs dfs -rm -r hdfs://bd001:8020/data/consumer/bill/checkpoint/*
+ *         2、hdfs dfs -rm -r hdfs://bd001:8020/data/dashboard/ruian/sdt=curTime
+ *         3、spark-submit --class com.mengyao.graph.etl.apps.commons.datasource.bill.BillConsumer --master yarn --deploy-mode cluster --driver-memory 4g --executor-cores 6 --executor-memory 5g --queue default --verbose data-graph-etl.jar
+ * 
+ * @author mengyao
+ *
+ */
+public class BillConsumer {
+
+    private static final ThreadLocal<SimpleDateFormat> FORMATTER_YMD = ThreadLocal.withInitial(() -> new SimpleDateFormat("yyyyMMdd"));
+    private static final ThreadLocal<SimpleDateFormat> FORMATTER_YMDHMS = ThreadLocal.withInitial(() -> new SimpleDateFormat("yyyyMMddHHmmss"));
+    private static final ThreadLocal<SimpleDateFormat> FORMATTER_YMDHMSS = ThreadLocal.withInitial(() -> new SimpleDateFormat("yyyyMMddHHmmssSSS"));
+    private static final String BASE_PATH = "hdfs://bd001:8020/data/dashboard/ruian/";
+    private static final String TMP_PATH = "/merge";
+    private static String appName = "BillConsumer";
+    private static String logLevel = "ERROR";
+
+    
+    public static void main(String[] args) {
+        args = new String[] {"hdfs://bd001:8020/data/consumer/bill/checkpoint", "10", "base.mq.goo.com:9877", "Bill", "bill_dev_group_00013"};
+        if (args.length < 5) {
+            System.err.println("Usage: "+appName+" <checkpointDir> <milliseconds> <namesrvAddr> <groupId> <topic>");
+            System.exit(1);
+        }
+        
+        String checkPointDir = args[0];
+        int second = Integer.parseInt(args[1]);
+        String namesrv = args[2];
+        Validate.notNull(namesrv, "RocketMQ namesrv not null!");
+        String topic = args[3];
+        Validate.notNull(topic, "RocketMQ topic not null!");
+        String group = args[4];
+        Validate.notNull(group, "RocketMQ group not null!");
+        
+        Function0<JavaStreamingContext> jscFunc = () -> createJavaSparkStreamingContext(checkPointDir, second, namesrv, topic, group);
+        JavaStreamingContext jssc = JavaStreamingContext.getOrCreate(checkPointDir, jscFunc, new Configuration());
+        jssc.sparkContext().setLogLevel(logLevel);
+        
+        try {
+            jssc.start();
+            jssc.awaitTermination();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        } finally {
+            jssc.stop(false, true);//关闭StreamingContext但不关闭SparkContext，同时等待数据处理完成
+        }
+    }
+    
+    /**
+     * 获取当前时间yyyyMMdd，匹配账单数据saleTime
+     * @param curTime
+     * @return
+     */
+    static String getCurrentDate(long curTime) {
+        return FORMATTER_YMD.get().format(new Date(curTime));
+    }
+    
+    /**
+     * 打印bill RDD<BCD>的分区及占用空间大小，debug方法
+     * @param rdd
+     * @param time
+     */
+    static void printStream(JavaRDD<BCD> rdd, Time time) {rdd.id();
+        System.out.println("==== time: "+FORMATTER_YMDHMSS.get().format(new Date(time.milliseconds()))+", rdd: partitions="+rdd.getNumPartitions()+", space="+SizeEstimator.estimate(rdd)/1048576+"mb");
+    }
+
+    /**
+     * 合并parquet小文件
+     * @param session
+     * @param dfsDir
+     */
+    static void mergeSmallFiles(Dataset<Row> fulls, SparkSession session, String dfsDir) {
+        fulls.coalesce(1).write().mode(SaveMode.Overwrite).parquet(BASE_PATH+TMP_PATH);
+        session.read().parquet(BASE_PATH+TMP_PATH).coalesce(1).write().mode(SaveMode.Overwrite).parquet(dfsDir);
+    }
+    
+    /**
+     * 创建DFS Dir
+     * @param session
+     * @param dfsDir
+     */
+    static void mkDfsDir(SparkSession session, String dfsDir) {
+        FileSystem fs = null;
+        try {
+            fs = FileSystem.get(session.sparkContext().hadoopConfiguration());
+            Path path = new Path(dfsDir);
+            if(!fs.exists(path)) {
+                fs.mkdirs(path);
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        } finally {
+            try {
+                if (null != fs) {fs.close();}
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+    
+    /**
+     * 容错Driver
+     * @param checkPointDir
+     * @param second
+     * @param namesrv
+     * @param topic
+     * @param group
+     * @return
+     */
+    static JavaStreamingContext createJavaSparkStreamingContext(String checkPointDir, int second, String namesrv, String topic, String group) {
+        try {
+            SparkConf conf = new SparkConf()
+                    //==== Enable Back Pressure
+                    .set("spark.streaming.backpressure.enabled", "true")//启用被压机制
+                    .set("spark.streaming.backpressure.initialRate", "50000")//初始接收数据条数，如该值为空时使用spark.streaming.backpressure.initialRate为默认值
+                    .set("spark.streaming.receiver.maxRate", "100")//每秒接收器可接收的最大记录数
+                    //==== Enable Dynamic Resource Allocation
+                    .set("spark.dynamicAllocation.enabled", "false")//禁用spark动态资源分配
+                    .set("spark.streaming.dynamicAllocation.enabled", "true")//启用SparkStreaming动态资源分配，该配置和spark动态资源分配存在冲突，只能使用一个
+                    .set("spark.streaming.dynamicAllocation.minExecutors", "2")//启用SparkStreaming动态资源分配后的给应用使用的最小executor数
+                    .set("spark.streaming.dynamicAllocation.maxExecutors", "3")//启用SparkStreaming动态资源分配后的给应用使用的最大executor数
+                    //==== Spark Streaming Parallelism and WAL
+                    .set("spark.streaming.concurrentJobs", "1")//并行job数量，默认1
+                    .set("spark.streaming.blockInterval", "5000")//SparkStreaming接收器接收数据后5000毫秒生成block，默认200毫秒
+                    .set("spark.streaming.receiver.writeAheadLog.enable", "true")//开启SparkStreaming接收器的WAL来确保接收器实现至少一次的容错语义
+                    .set("spark.streaming.driver.writeAheadLog.allowBatching", "true")//driver端WAL
+                    .set("spark.streaming.driver.writeAheadLog.batchingTimeout", "15000")
+                    //==== Hive on Spark
+                    .set("hive.execution.engine", "spark")//设置hive引擎为spark，hdp-2.6.1.0默认支持tez、mr，可通过应用级别配置使用Hive on Spark
+                    .set("hive.enable.spark.execution.engine", "true")//启用Hive on Spark
+                    .set("spark.driver.extraJavaOptions", "-Dhdp.version=2.6.1.0-129")//hdp-2.6.1.0中要求Hive on Spark必须指定driver的jvm参数
+                    .set("spark.yarn.am.extraJavaOptions", "-Dhdp.version=2.6.1.0-129")//hdp-2.6.1.0中要求Hive on Spark必须指定ApplicationMaster的jvm参数
+                    //==== Hive Merge Small Files
+                    .set("hive.metastore.uris", "thrift://bd001:9083")//hive ThriftServer
+                    .set("hive.merge.sparkfiles", "true")//合并spark小文件
+                    .set("hive.merge.mapfiles", "true")//在只有map任务的作业结束时合并小文件。
+                    .set("hive.merge.mapredfiles", "true")//在mapreduce作业结束时合并小文件。
+                    .set("hive.merge.size.per.task", "268435456")//作业结束时合并文件的大小。
+                    .set("hive.merge.smallfiles.avgsize", "100000")//当作业的平均输出文件大小小于此数量时，Hive将启动另一个map-reduce作业，以将输出文件合并为更大的文件。如果hive.merge.mapfiles为true，则仅对仅map作业执行此操作;对于hive.merge.mapredfiles为true，仅对map-reduce作业执行此操作。
+                    //==== Spark SQL Optimizer
+                    .set("spark.sql.warehouse.dir", "hdfs://bd001:8020/apps/hive/warehouse")//SparkSQL依赖的hive仓库地址
+                    .set("spark.sql.files.maxPartitionBytes", "134217728")//SparkSQL读取文件数据时打包到一个分区的最大字节数
+                    .set("spark.sql.files.openCostInBytes", "134217728")//当SparkSQL读取的文件中有大量小文件时，小于该值的文件将被合并处理，默认4M，此处设置为128M
+                    .set("spark.sql.shuffle.partitions", "600")//SparkSQL运行shuffle的并行度
+                    .set("spark.sql.autoBroadcastJoinThreshold", "67108864")//设置为64M，执行join时自动广播小于该值的表，默认10M
+                    //==== Spark Core Configure
+                    .set("spark.rdd.compress","true")//开启rdd压缩以节省内存
+                    .set("spark.default.parallelism", "600")//并行任务数
+                    .set("spark.rpc.askTimeout", "300")//spark rpc超时时间
+                    .set("spark.eventLog.enabled", "true")//开启eventLog
+                    //==== Application Configure
+                    .set("spark.app.name", appName)//Spark Application名称
+                    .set("spark.master", "yarn")//运行模式为Spark on YARN
+                    .set("spark.deploy.mode", "cluster")//部署模式为yarn-cluster
+                    .set("spark.driver.memory", "4g")//driver内存4g
+                    .set("spark.driver.cores", "1")//driver计算vcore数量为1
+                    .set("spark.executor.memory", "5g")//executor内存为4g
+                    .set("spark.executor.heartbeatInterval", "20000")//executor心跳间隔20秒，默认10秒
+                    .set("spark.yarn.archive", "hdfs://bd001:8020/hdp/apps/2.6.1.0-129/spark2")//spark依赖jar存档到hdfs指定位置
+                    .set("spark.executor.extraJavaOptions", "-XX:+PrintGCDetails -XX:+PrintGCTimeStamps -XX:+UseConcMarkSweepGC")//打印GC详情和耗时
+                    .set("spark.jars", "/usr/hdp/2.6.1.0-129/sqoop/lib/mysql-connector-java.jar")//如果使用了数据库驱动，则通过此配置即可
+                    //==== Serialized Configure
+                    .set("spark.kryoserializer.buffer", "512k")//默认64k，设置为256k
+                    .set("spark.kryoserializer.buffer.max", "256m")//默认64m，设置为256m
+                    .set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")//使用kryo序列化库
+                    .registerKryoClasses(new Class[]{HashMap.class, BCD.class})
+                    ;
+            
+            //构建MQ配置
+            @SuppressWarnings("serial")
+            HashMap<String, String> mqConf = new HashMap<String, String>() {{
+                put(RocketMQConfig.NAME_SERVER_ADDR, namesrv);
+                put(RocketMQConfig.CONSUMER_TOPIC, topic);
+                put(RocketMQConfig.CONSUMER_GROUP, group);
+            }};
+            
+            JavaStreamingContext jssc = new JavaStreamingContext(conf, Durations.seconds(second));
+            jssc.checkpoint(checkPointDir);
+            jssc.remember(Durations.minutes(1440));
+            
+            //接収RocketMQ账单
+            JavaReceiverInputDStream<BCD> billListRDD = jssc.receiverStream(new RocketMQReceiver(mqConf, StorageLevels.MEMORY_AND_DISK_SER));
+            
+            billListRDD
+                .foreachRDD((rdd, time) -> {
+                    boolean isEmpty = rdd.partitions().isEmpty();
+                    if (!isEmpty) {
+                        printStream(rdd, time);
+                        
+                        long start = System.currentTimeMillis();
+                        String curTime = getCurrentDate(start).intern();
+                        String dfsDir = (BASE_PATH+"sdt="+curTime+"/").intern();
+                        
+                        //账单计数器
+                        //LongAccumulator billAccumulator = BillAccumulator.getInstance(JavaSparkContext.fromSparkContext(rdd.context()), appName);
+                        //billAccumulator.add(rdd.count());
+                        
+                        //初始化SparkSession
+                        SparkSession session = HiveSession.getInstance(conf);
+                        
+                        //维表等广播
+                        BroadcastDIM dim = BroadcastWrapper.getInstance(JavaSparkContext.fromSparkContext(rdd.context())).getValue();
+                        SaleAnalysisService service = dim.getService();
+                        Dataset<Row> shop = dim.getShop();
+                        Dataset<Row> type = dim.getType();
+                        Dataset<Row> ruian = dim.getRuian();
+                        String mallIdStr = dim.getMallIdStr();
+                        
+                        Set<String> areaSet=dim.getAreaSet();
+                        Map<String, Set<String>> areaMall=dim.getAreaMall();
+                        Set<String> mallSet=dim.getMallSet();
+                        Set<String> typeSet=dim.getTypeSet();
+                        
+                        
+                        //如果时间为00:00:00时则认为是新的一天，更新广播数据
+                        if ((curTime+"000000").equals(FORMATTER_YMDHMS.get().format(new Date(time.milliseconds())))) {
+                            BroadcastWrapper.update(session, JavaSparkContext.fromSparkContext(rdd.context()));//更新dim表数据
+                            mkDfsDir(session, dfsDir);//初始化dfsDir
+                        }
+                        
+                        //先持久化本次接收到的账单（写入当日）
+                        session.createDataFrame(rdd, BCD.class)
+                            .filter("sdt = "+curTime)
+                            .write()
+                            .mode("append")
+                            .parquet(dfsDir);
+                        
+                        //再读取全量账单（读取当日）
+                        Dataset<Row> bills = session.read().parquet(dfsDir)
+                            .filter("shopId in ("+mallIdStr+")")
+                            .dropDuplicates("billId")
+                            //.coalesce(1)
+                            .cache();
+                        
+                        //计算大屏指标
+                        System.out.println("==== 计算指标：时间条件："+curTime+" ====");
+                        service.totalSale(bills);
+                        service.totalRefund(bills);
+                        service.peakTime(bills);
+                        service.areaSaleTrendForAll(bills, ruian,areaSet, curTime);
+                        service.projectContrast(bills, ruian,areaMall);
+                        service.saleForShopTop10(bills, shop, ruian);
+                        service.projectTypeSaleContrast(bills, shop, type, ruian,areaSet,mallSet,typeSet);
+                        long end = System.currentTimeMillis();
+                        System.out.println("==== 计算指标：耗时："+(end-start)+"/ms ====");
+                        bills.unpersist();
+                        //每天最多存6个文件
+                        if (bills.inputFiles().length > 6) {
+                            mergeSmallFiles(bills, session, dfsDir);
+                        }
+                    } else {//如果SparkStreaming接收的Batch为空，则不做处理
+                        System.out.println("==== rdd is null! ");
+                    }
+                });
+            return jssc;
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+}
+
+/**
+ * 广播DIM相关数据
+ * @author mengyao
+ *
+ */
+class BroadcastWrapper {
+    private static volatile Broadcast<BroadcastDIM> instance = null;
+    
+    public static Broadcast<BroadcastDIM> getInstance(JavaSparkContext jsc) {
+        if (instance == null) {
+            synchronized (BroadcastWrapper.class) {
+                if (instance == null) {
+                    SparkSession session = HiveSession.getInstance(jsc.getConf());
+                    BroadcastDIM dim = new BroadcastDIM(session);
+                    dim.assign();
+                    instance = jsc.broadcast(dim);
+                }
+            }
+        }
+        return instance;
+    }
+    
+    /**
+     * 每日更新数据
+     * @param batchTime    batch发生时间
+     * @param dayES    每日开始时间
+     */
+    public static void update(SparkSession session, JavaSparkContext jsc) {
+        BroadcastDIM dim = instance.getValue();
+        if (null!=dim) {
+            dim.assign();
+            jsc.broadcast(dim);
+        }
+    }
+}
+
+class BroadcastDIM {
+    private SparkSession session;
+    private SaleAnalysisService service = new SaleAnalysisService();
+    private Dataset<Row> shop;
+    private Dataset<Row> type;
+    private Dataset<Row> ruian;
+    private String mallIdStr;
+    private List<RuianMall> ruianList ;
+    private Set<String>  areaSet;
+    private Set<String>  typeSet;
+    private Set<String> mallSet;
+    private Map<String, Set<String>> areaMall;
+    public BroadcastDIM(SparkSession session) {
+        this.session = session;
+    }
+    public void assign() {
+        ruian = session.sql("select id,item,name,area_en,area_cn,channel,mid,rmid from tbl_dim_ruian").cache();
+        Row[] ruianRows = (Row[])ruian.collect();
+        setRuianList(ruianRows);
+        setAreaSet();
+        setMallIdStr();
+        setRuianMallAll();
+        setMallSet();
+        shop = session.sql("select id,shop_entity_id,shop_entity_name,shop_id,shop_entity_type_root,shop_entity_type_leaf,bill_match_mode,leasing_model,shop_entity_status,open_time,close_time,open_time_list,close_time_list,monite_begin_time_list,monite_end_time_list,marketing_copywriter,marketing_image,font_style,font_size,contract_area,province,city,area,billhint,is_del,brand,brand_code,classify,in_aera,storey,leasing_resource,shop_entity_source,create_time,c_time_stamp,shop_entity_img,business_area_id,source,status,logo,door_head_photo,business_license,certificate,coordinates,consume_per,brand_name,brand_log,alipay,process  "
+                + "from tbl_ods_shop where shop_id in ("+mallIdStr+")").cache();
+        type = session.sql("select * from tbl_ods_type").cache();
+        setRuianType();
+    }
+    public void  setRuianList(Row[] rows) {
+        if(rows.length>0){
+            ruianList=new ArrayList<>();
+            for(Row row:rows){
+                RuianMall rm=new RuianMall();
+                if(!row.isNullAt(0)){//id
+                    rm.setId(row.getInt(0));
+                }
+                if(!row.isNullAt(1)){//item
+                    rm.setItem(row.getString(1));
+                }
+                if(!row.isNullAt(2)){//name
+                    rm.setName(row.getString(2));
+                }
+                if(!row.isNullAt(3)){//area_en
+                    rm.setAreaEn(row.getString(3));
+                }
+                if(!row.isNullAt(4)){//area_cn
+                    rm.setArenCn(row.getString(4));
+                }
+                if(!row.isNullAt(5)){//channel
+                    rm.setChannel(row.getString(5));
+                }
+                if(!row.isNullAt(6)){//mid
+                    rm.setMid(row.getInt(6));
+                }
+                if(!row.isNullAt(7)){//rmid
+                    rm.setRmid(row.getString(7));
+                }
+                ruianList.add(rm);
+            }
+        }
+    }
+    /**
+     * 提取rmid 拼接成字符串
+     * @param rows
+     */
+    public void setMallIdStr() {
+        if(ruianList.size()>0){
+            StringBuilder sbStr=new StringBuilder();
+            for(RuianMall row : ruianList){
+                sbStr.append("'").append(row.getRmid()).append("',");
+            }
+            String tmpValue = sbStr.toString();
+            mallIdStr=tmpValue.substring(0, tmpValue.length()-1);
+        }
+    }
+    /**
+     * 提取非空唯一中文区域名称 
+     * @return
+     */
+    public void setAreaSet() {
+        if(ruianList.size()>0){
+            areaSet=new java.util.HashSet<>();
+            for(RuianMall row:ruianList){
+                areaSet.add(row.getArenCn());
+            }
+        }
+    }
+    /**
+     * 提取瑞安mall 14个机构中文名
+     * 
+     * @return
+     * Map<String,Set<String>>
+     * key:areaCn value :  Set<mallName>
+     */
+    public void setRuianMallAll( ){
+        areaMall=new HashMap<>();
+        ruianList.forEach(rm->{
+            if(areaMall.containsKey(rm.getArenCn())){//存在，更新mall的列表
+                areaMall.get(rm.getArenCn()).add(rm.getName());
+            }else{//新的区域，新的mall
+                Set<String> mallSet=new HashSet<>();
+                mallSet.add(rm.getName());
+                areaMall.put(rm.getArenCn(),mallSet);
+            }
+        });
+    }
+    /**
+     * 提取瑞安mall 14个机构中文名
+     * 
+     * @return
+     */
+    public void setMallSet(){
+        mallSet=new java.util.HashSet<>();
+        ruianList.forEach(rm->{
+            if(!mallSet.contains(rm.getName())){//存在，更新mall的列表
+                mallSet.add(rm.getName());
+            }
+        });
+    }
+    /**
+     * 性能、性能、性能 考虑，先写死
+     * 如果用账单、店铺、业态关联查询，效率会很慢
+     * 
+     * @return
+     */
+    public void setRuianType(){
+        //TODO 目前写死，需要改
+        typeSet=new HashSet<>();
+        typeSet.add("服务");
+        typeSet.add("零售");
+        typeSet.add("娱乐");
+        typeSet.add("主力店");
+        typeSet.add("餐饮");
+        typeSet.add("其它");
+    }
+    public SaleAnalysisService getService() {
+        return service;
+    }
+    public void setService(SaleAnalysisService service) {
+        this.service = service;
+    }
+    public Dataset<Row> getShop() {
+        return shop;
+    }
+    public void setShop(Dataset<Row> shop) {
+        this.shop = shop;
+    }
+    public Dataset<Row> getType() {
+        return type;
+    }
+    public void setType(Dataset<Row> type) {
+        this.type = type;
+    }
+    public Dataset<Row> getRuian() {
+        return ruian;
+    }
+    public void setRuian(Dataset<Row> ruian) {
+        this.ruian = ruian;
+    }
+    public String getMallIdStr() {
+        return mallIdStr;
+    }
+    public void setMallIdStr(String mallIdStr) {
+        this.mallIdStr = mallIdStr;
+    }
+    public List<RuianMall> getRuianList() {
+        return ruianList;
+    }
+    public Set<String> getAreaSet() {
+        return this.areaSet;
+    }
+    public Map<String, Set<String>> getAreaMall() {
+        return this.areaMall;
+    }
+    public Set<String> getMallSet() {
+        return this.mallSet;
+    }
+    public Set<String> getTypeSet() {
+        return this.typeSet;
+    }
+}
+
+/**
+ * 账单累加器
+ * @author mengyao
+ *
+ */
+class BillAccumulator {
+    private static volatile LongAccumulator instance = null;
+
+    public static LongAccumulator getInstance(JavaSparkContext jsc, String name) {
+        if (instance == null) {
+            synchronized (BillAccumulator.class) {
+                if (instance == null) {
+                    instance = jsc.sc().longAccumulator(name);
+                }
+            }
+        }
+        return instance;
+    }
+}
+
+/**
+ * SparkSQL的Hive数据源
+ * @author mengyao
+ *
+ */
+class HiveSession {
+    private static transient SparkSession instance = null;
+    
+    public static SparkSession getInstance(SparkConf conf) {
+        if (instance == null) {
+            instance = SparkSession.builder()
+                    .config(conf)
+                    .enableHiveSupport()
+                    .getOrCreate();
+        }
+        return instance;
+    }
+}
+复制代码
+ 
+
+4.4、账单实体类
+
+复制代码
+package com.mengyao.graph.etl.apps.commons.beans.ods.fmt;
+
+import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+import org.apache.commons.lang.StringUtils;
+
+import com.mengyao.graph.etl.apps.commons.beans.ods.BillInfo;
+import com.mengyao.graph.etl.apps.commons.beans.ods.DiscountDetailsInfo;
+import com.mengyao.graph.etl.apps.commons.beans.ods.GoodsDetailInfo;
+import com.mengyao.graph.etl.apps.commons.beans.ods.SettlementWayInfo;
+import com.mengyao.utils.DateTimeUtils;
+
+/**
+ * 账单信息 gag_bill.bill_info
+ * 
+ * @author jmb
+ * @update 2018-12-13 for mengyao
+ */
+public class BillInfoFmt implements Serializable {
+    private static final long serialVersionUID = 1L;
+
+    /**
+     * 预结单
+     */
+    public static final String BILLTYPE_JUJIEDAN = "2";
+    /**
+     * 结账单
+     */
+    public static final String BILLTYPE_JIEZHANGDAN = "1";
+    /**
+     * 日结账单
+     */
+    public static final String BILLTYPE_RIJIEDAN = "3";
+    /**
+     * 点菜单
+     */
+    public static final String BILLTYPE_DIANCAIDAN = "7";
+
+    /**
+     * 账单编号（系统产生），UUID
+     */
+    private String id;
+
+    /**
+     * 账单编号（系统产生），HBase主键
+     */
+    private String rowKey;
+
+    /**
+     * 商家编号（系统产生）
+     */
+    private String shopId;
+
+    /**
+     * 商家名称（系统产生）
+     */
+    private String shopName;
+
+    /**
+     * 实体店编号（系统产生）
+     */
+    private String shopEntityId;
+
+    /**
+     * 实体店名称（系统产生）
+     */
+    private String shopEntityName;
+
+    /**
+     * 创建时间（系统产生）
+     */
+    private String createTime;
+
+    /**
+     * 最后一次修改时间（系统产生）
+     */
+    private String cTimeStamp;
+
+    /**
+     * 信息上传时间（以header中创建时间为准yyyyMMddHHmmss）
+     */
+    private String hcTime;
+
+    /**
+     * 流水号(header中的流水号)
+     */
+    private String hserial;
+
+    /**
+     * 修正账单数据的设备编号（如果没有修正，则与原始上传账单的采集终端编号相同）
+     */
+    private String fixTerminal;
+
+    /**
+     * 采集终端编号（截获）
+     */
+    private String terminalNumber;
+
+    /**
+     * 账单文件名称，唯一（截获），12位MAC地址+17位时间
+     */
+    private String billfileName;
+
+    /**
+     * 反扫支付时终端生成的终端流水号UUID（全球唯一）[先支付后打单必填]
+     */
+    private String tsuuid;
+
+    /**
+     * 历史账单文件名称，记录合并过程中历次账单文件名称，全量，mongodb为Array
+     */
+    private List<String> billfileNameHis;
+
+    /**
+     * 账单序号，不保证唯一（截获）
+     */
+    private String billNo;
+
+    /**
+     * 截获时间（截获）
+     */
+    private String interceptTime;
+
+    /**
+     * 店铺全名（截获）
+     */
+    private String shopEntityFullName;
+
+    /**
+     * 店铺地址（截获）
+     */
+    private String shopEntityAddress;
+
+    /**
+     * 电话（截获）
+     */
+    private String telephone;
+
+    /**
+     * 售货员（截获）
+     */
+    private String saler;
+
+    /**
+     * 收银台（截获）
+     */
+    private String checkstand;
+
+    /**
+     * 收银员（截获）
+     */
+    private String cashier;
+
+    /**
+     * 应收金额（截获）
+     */
+    private Double receivableAmount;
+
+    /**
+     * 原始应收金额（截获）
+     */
+    private Double defaultReceivableAmount;
+
+    /**
+     * 商品数量（截获）
+     */
+    private Double totalNum;
+
+    /**
+     * 原始商品数量（截获）
+     */
+    private Double defaultTotalNum;
+
+    /**
+     * 小票流水号（截获）
+     */
+    private String billSerialNumber;
+
+    /**
+     * 总金额（截获）
+     */
+    private Double totalFee;
+
+    /**
+     * 原始总金额（截获）
+     */
+    private Double defaultTotalFee;
+
+    /**
+     * 实收金额（截获）
+     */
+    private Double paidAmount;
+
+    /**
+     * 原始实收金额（截获）
+     */
+    private Double defaultPaidAmount;
+
+    /**
+     * 折扣金额（截获）
+     */
+    private Double discountAmount;
+
+    /**
+     * 原始折扣金额（截获）
+     */
+    private Double defaultDiscountAmount;
+
+    /**
+     * 优惠金额（截获）
+     */
+    private Double couponAmount;
+
+    /**
+     * 原始优惠金额（截获）
+     */
+    private Double defaultCouponAmount;
+
+    /**
+     * 找零金额（截获）
+     */
+    private Double changeAmount;
+
+    /**
+     * 原始找零金额（截获）
+     */
+    private Double defaultChangeAmount;
+
+    /**
+     * 结算方式（支持多项）（截获）例：[{"a":5.0,"p":"现金"},{"a":10.01,"p":"书券"}],"a":结算金额，小数[截获，必填],
+     * "p":"结算方式[截获，必填]"
+     */
+    private List<String> settlementWay;
+
+    /**
+     * 销售时间（截获）
+     */
+    private String saleTime;
+
+    /**
+     * 会员卡号（截获）
+     */
+    private String memberCardNumber;
+
+    /**
+     * 累计消费（截获）
+     */
+    private Double totalConsumption;
+
+    /**
+     * 原始累计消费（截获）
+     */
+    private Double defaultTotalConsumption;
+
+    /**
+     * 网址（截获）
+     */
+    private String website;
+
+    /**
+     * 小票图片（截获）,只存url
+     */
+    private String billImage;
+
+    /**
+     * 商品详情（支持多项）（截获）[{"name":"可乐","itemserial":"PUMU00123","price":5.01,"totalnum":5.0,"totalprice":25.05},{"name":"金枪鱼","itemserial":"FOOD02012","price":10.55,"totalnum":1.5,"totalprice":15.83}]
+     * ,"name":"商品名称[截获，选填]","itemserial":"条形码[截获，选填]","price":单价,小数[截获，选填],"totalnum":总数,小数[截获，选填],"totalprice":总价,小数[截获，选填]
+     */
+    private List<String> goodsDetails;
+
+    /**
+     * 房间号（截获）（酒店特有）
+     */
+    private String roomNo;
+
+    /**
+     * 入住姓名（截获）（酒店特有）
+     */
+    private String checkinName;
+
+    /**
+     * 桌号（截获）（餐饮特有）
+     */
+    private String deskNo;
+
+    /**
+     * 消费人数（截获）（一般用于餐饮）
+     */
+    private Double consumeNum;
+
+    /**
+     * 原始消费人数（截获）（一般用于餐饮）
+     */
+    private Double defaultConsumeNum;
+
+    /**
+     * 原始账单所有文本信息(截获)
+     */
+    private String billText;
+
+    /**
+     * 入住时间(截获)(酒店特有)
+     */
+    private String inTime;
+
+    /**
+     * 离店时间(截获)(钟点房特有)
+     */
+    private String outTime;
+    /**
+     * 默认打印时间
+     */
+    private String defaultPrintDate;
+    /**
+     * 默认入住时间
+     */
+    private String defaultInTime;
+    /**
+     * 默认离店时间
+     */
+    private String defaultOutTime;
+
+    /**
+     * 上传类型 1：全单上传 2. 筛选账单上传
+     */
+    private String uploadType;
+
+    /**
+     * 除了上面截获外的自定义数据（截获），json串（Map<String, Object>）,json串中的key,value由采集终端自定义。
+     */
+    private Map<String, String> customRecord;
+
+    /**
+     * 账单类型1:结账单2:预结单 3:日结单 4:处方 5:预付押金单 6:退货单 7:点菜单 8:发票单 [选填]
+     */
+    private String billType;
+
+    /**
+     * 账单修改方式 0:默认值 1:收银员重打 2:人工修改金额 3:自动重解析
+     */
+    private String modifyType = "0";
+
+    /**
+     * 账单来源 1:设备采集 2:人工补录3、解析服务 4.第三方
+     */
+    private String billSource = "1";
+
+    /**
+     * 服务端解析路径[选填，用于服务端解析分析问题]
+     */
+    private String analyzPath;
+
+    /**
+     * 刷卡，钱包等匹配账单的key,格式BILL_MAC_金额_截获时间
+     */
+    private String billMatchKey;
+
+    /**
+     * 数据匹配支付结果等成功后,此字段保存支付结果等的主键 [选填] 匹配成功后为必填,理论上应该保证此值为全局唯一
+     */
+    private String matchId;
+
+    /**
+     * 默认销售时间;
+     */
+    private String defaultSaleTime;
+
+    /**
+     * 客户名称[截获，选填]
+     */
+    private String customerName;
+    /**
+     * 会员编号[截获，选填]
+     */
+    private String membershipId;
+    /**
+     * 会员级别[截获，选填]
+     */
+    private String memberLevels;
+    /**
+     * 宠物名称[截获，选填]
+     */
+    private String petName;
+    /**
+     * 宠物编号[截获，选填]
+     */
+    private String petNumber;
+    /**
+     * 负责人（医生）[截获，选填]
+     */
+    private String principal;
+    /**
+     * 预交押金[截获，选填]
+     */
+    private String deposit;
+    /**
+     * 打印时间yyyyMMddHHmmss[截获，选填，如果截获位数不够，后面补0]
+     */
+    private String printDate;
+    /**
+     * 默认拦截时间
+     */
+    private String defaultInterceptTime;
+    /**
+     * 匹配模型 sk0001:先刷卡后打单,单次刷卡; dd0001:先打单后刷卡,单次刷卡
+     */
+    private String printMatchType;
+
+    /**
+     * 账单合并时使用,唯一
+     */
+    private String billMergeKey;
+    /**
+     * 存重打单的应收金额
+     */
+    private Double modifyAmount;
+    /**
+     * 存重打单的应收金额List
+     */
+    private List<Double> modifyAmountList;
+    /**
+     * 存重打单的应收金额的销售时间List
+     */
+    private List<String> modifyAmountSaleTimeList;
+    /**
+     * 存重打单的应收金额的截获时间List
+     */
+    private List<String> modifyAmountInterceptTimeList;
+    /**
+     * 唯一标识[选填]（目前可用来做积分标识使用）
+     */
+    private String uniqueId;
+    /**
+     * 历史唯一标识，记录合并过程中历次唯一标识，全量，mongodb为Array（目前可用来做积分标识使用）
+     */
+    private List<String> uniqueIdHis;
+    /**
+     * 是否追加二维码 1：是 2：否 [必填]
+     */
+    private String ifqrcode;
+    /**
+     * 优惠券券码
+     */
+    private String couponNum;
+    /**
+     * ERP会员
+     */
+    private String erpMemberCard;
+    /**
+     * 凭证类型 11:水单（商户pos、ERP打印）12:收银凭证（大pos打印） 13:支付凭证（签购单）99：类型未知 [选填，默认写99，表示未知]
+     */
+    private String voucherType;
+    /**
+     * 小票二维码[选填]
+     */
+    private String qrCode;
+    /**
+     * 积分标识 0：本次积分字段没找到或没有配置 1：有本次积分字段[选填]
+     */
+    private String integralmark;
+    /**
+     * 本次积分[选填]
+     */
+    private String thisintegral;
+    /**
+     * 备注[选填]
+     */
+    private String remarks;
+    /**
+     * 账单子类型，庖丁用于配置文件分类
+     */
+    private String templateName;
+    /**
+     * 购货方名称[截获，选填]
+     */
+    private String custName;
+    /**
+     * 购货方税号[截获，选填]
+     */
+    private String custTaxNo;
+    /**
+     * 购货方地址、电话[截获，选填]
+     */
+    private String custAdress;
+    /**
+     * 购货方银行及账号[截获，选填]
+     */
+    private String custBankAccount;
+
+    /**
+     * 第三方订单号(第三方系统唯一)
+     */
+    private String thirdPartyOrderNo;
+    /**
+     * 充值卡消费金额[截获，选填]
+     */
+    private Double rechargeableCardConsumeAmount;
+    /**
+     * 原始充值卡消费金额[截获，选填]
+     */
+    private Double defaultRechargeableCardConsumeAmount;
+    /**
+     * 实付金额[截获，选填]
+     */
+    private Double outOfPocketAmount;
+    /**
+     * 原始实付金额[截获，选填]
+     */
+    private Double defaultOutOfPocketAmount;
+    /**
+     * 充值金额[截获，选填]
+     */
+    private Double rechargeAmount;
+    /**
+     * 原始充值金额[截获，选填]
+     */
+    private Double defaultRechargeAmount;
+    /**
+     * 会员价[截获，选填]
+     */
+    private Double memberPrice;
+    /**
+     * 原始会员价[截获，选填]
+     */
+    private Double defaultMemberPrice;
+    /**
+     * 会员折扣率[截获，选填]
+     */
+    private Double memberDiscountrate;
+    /**
+     * 原始会员折扣率[截获，选填]
+     */
+    private Double defaultMemberDiscountrate;
+    /**
+     * 会员累计消费[截获，选填]
+     */
+    private Double memberTotalConsumption;
+    /**
+     * 原始会员累计消费[截获，选填]
+     */
+    private Double defaultMemberTotalConsumption;
+    /**
+     * 外卖单 1:外卖单 2:非外卖单[截获，选填]
+     */
+    private String takeout;
+
+    /**
+     * 优惠商品详情（支持多项）（截获），{"name":"可乐","price":5.01}
+     */
+    private List<String> discountDetails;
+
+    public String getThirdPartyOrderNo() {
+        return thirdPartyOrderNo;
+    }
+
+    public void setThirdPartyOrderNo(String thirdPartyOrderNo) {
+        this.thirdPartyOrderNo = thirdPartyOrderNo;
+    }
+
+    public String getRemarks() {
+        return remarks;
+    }
+
+    public void setRemarks(String remarks) {
+        this.remarks = remarks;
+    }
+
+    public String getTemplateName() {
+        return templateName;
+    }
+
+    public void setTemplateName(String templateName) {
+        this.templateName = templateName;
+    }
+
+    public String getDefaultPrintDate() {
+        return this.defaultPrintDate;
+    }
+
+    public void setDefaultPrintDate(String defaultPrintDate) {
+        this.defaultPrintDate = defaultPrintDate;
+    }
+
+    public String getDefaultInTime() {
+        return this.defaultInTime;
+    }
+
+    public void setDefaultInTime(String defaultInTime) {
+        this.defaultInTime = defaultInTime;
+    }
+
+    public String getDefaultOutTime() {
+        return this.defaultOutTime;
+    }
+
+    public void setDefaultOutTime(String defaultOutTime) {
+        this.defaultOutTime = defaultOutTime;
+    }
+
+    public String getCouponNum() {
+        return this.couponNum;
+    }
+
+    public void setCouponNum(String couponNum) {
+        this.couponNum = couponNum;
+    }
+
+    public String getErpMemberCard() {
+        return this.erpMemberCard;
+    }
+
+    public void setErpMemberCard(String erpMemberCard) {
+        this.erpMemberCard = erpMemberCard;
+    }
+
+    public String getVoucherType() {
+        return this.voucherType;
+    }
+
+    public void setVoucherType(String voucherType) {
+        this.voucherType = voucherType;
+    }
+
+    public String getAnalyzPath() {
+        return this.analyzPath;
+    }
+
+    public void setAnalyzPath(String analyzPath) {
+        this.analyzPath = analyzPath;
+    }
+
+    public List<Double> getModifyAmountList() {
+        return this.modifyAmountList;
+    }
+
+    public String getUniqueId() {
+        return this.uniqueId;
+    }
+
+    public void setUniqueId(String uniqueId) {
+        this.uniqueId = uniqueId;
+    }
+
+    public String getIfqrcode() {
+        return this.ifqrcode;
+    }
+
+    public void setIfqrcode(String ifqrcode) {
+        this.ifqrcode = ifqrcode;
+    }
+
+    public void setModifyAmountList(List<Double> modifyAmountList) {
+        this.modifyAmountList = modifyAmountList;
+    }
+
+    public Double getModifyAmount() {
+        return this.modifyAmount;
+    }
+
+    public void setModifyAmount(Double modifyAmount) {
+        this.modifyAmount = modifyAmount;
+    }
+
+    public String getDefaultSaleTime() {
+        return this.defaultSaleTime;
+    }
+
+    public void setDefaultSaleTime(String defaultSaleTime) {
+        this.defaultSaleTime = defaultSaleTime;
+    }
+
+    public String getBillMergeKey() {
+        return this.billMergeKey;
+    }
+
+    public void setBillMergeKey(String billMergeKey) {
+        this.billMergeKey = billMergeKey;
+    }
+
+    public String getCustName() {
+        return custName;
+    }
+
+    public void setCustName(String custName) {
+        this.custName = custName;
+    }
+
+    public String getCustTaxNo() {
+        return custTaxNo;
+    }
+
+    public void setCustTaxNo(String custTaxNo) {
+        this.custTaxNo = custTaxNo;
+    }
+
+    public String getCustAdress() {
+        return custAdress;
+    }
+
+    public void setCustAdress(String custAdress) {
+        this.custAdress = custAdress;
+    }
+
+    public String getCustBankAccount() {
+        return custBankAccount;
+    }
+
+    public void setCustBankAccount(String custBankAccount) {
+        this.custBankAccount = custBankAccount;
+    }
+
+    public List<String> getUniqueIdHis() {
+        return uniqueIdHis;
+    }
+
+    public void setUniqueIdHis(List<String> uniqueIdHis) {
+        this.uniqueIdHis = uniqueIdHis;
+    }
+
+    public Double getRechargeableCardConsumeAmount() {
+        return rechargeableCardConsumeAmount;
+    }
+
+    public void setRechargeableCardConsumeAmount(Double rechargeableCardConsumeAmount) {
+        this.rechargeableCardConsumeAmount = rechargeableCardConsumeAmount;
+    }
+
+    public Double getDefaultRechargeableCardConsumeAmount() {
+        return defaultRechargeableCardConsumeAmount;
+    }
+
+    public void setDefaultRechargeableCardConsumeAmount(Double defaultRechargeableCardConsumeAmount) {
+        this.defaultRechargeableCardConsumeAmount = defaultRechargeableCardConsumeAmount;
+    }
+
+    public Double getOutOfPocketAmount() {
+        return outOfPocketAmount;
+    }
+
+    public void setOutOfPocketAmount(Double outOfPocketAmount) {
+        this.outOfPocketAmount = outOfPocketAmount;
+    }
+
+    public Double getDefaultOutOfPocketAmount() {
+        return defaultOutOfPocketAmount;
+    }
+
+    public void setDefaultOutOfPocketAmount(Double defaultOutOfPocketAmount) {
+        this.defaultOutOfPocketAmount = defaultOutOfPocketAmount;
+    }
+
+    public Double getRechargeAmount() {
+        return rechargeAmount;
+    }
+
+    public void setRechargeAmount(Double rechargeAmount) {
+        this.rechargeAmount = rechargeAmount;
+    }
+
+    public Double getDefaultRechargeAmount() {
+        return defaultRechargeAmount;
+    }
+
+    public void setDefaultRechargeAmount(Double defaultRechargeAmount) {
+        this.defaultRechargeAmount = defaultRechargeAmount;
+    }
+
+    public Double getMemberPrice() {
+        return memberPrice;
+    }
+
+    public void setMemberPrice(Double memberPrice) {
+        this.memberPrice = memberPrice;
+    }
+
+    public Double getDefaultMemberPrice() {
+        return defaultMemberPrice;
+    }
+
+    public void setDefaultMemberPrice(Double defaultMemberPrice) {
+        this.defaultMemberPrice = defaultMemberPrice;
+    }
+
+    public Double getMemberDiscountrate() {
+        return memberDiscountrate;
+    }
+
+    public void setMemberDiscountrate(Double memberDiscountrate) {
+        this.memberDiscountrate = memberDiscountrate;
+    }
+
+    public Double getDefaultMemberDiscountrate() {
+        return defaultMemberDiscountrate;
+    }
+
+    public void setDefaultMemberDiscountrate(Double defaultMemberDiscountrate) {
+        this.defaultMemberDiscountrate = defaultMemberDiscountrate;
+    }
+
+    public Double getMemberTotalConsumption() {
+        return memberTotalConsumption;
+    }
+
+    public void setMemberTotalConsumption(Double memberTotalConsumption) {
+        this.memberTotalConsumption = memberTotalConsumption;
+    }
+
+    public Double getDefaultMemberTotalConsumption() {
+        return defaultMemberTotalConsumption;
+    }
+
+    public void setDefaultMemberTotalConsumption(Double defaultMemberTotalConsumption) {
+        this.defaultMemberTotalConsumption = defaultMemberTotalConsumption;
+    }
+
+    public String getTakeout() {
+        return takeout;
+    }
+
+    public void setTakeout(String takeout) {
+        this.takeout = takeout;
+    }
+
+    public List<String> getDiscountDetails() {
+        return discountDetails;
+    }
+
+    public void setDiscountDetails(List<String> discountDetails) {
+        this.discountDetails = discountDetails;
+    }
+
+    public String getId() {
+        return this.id;
+    }
+
+    public void setId(String id) {
+        this.id = id;
+    }
+
+    public String getShopId() {
+        return this.shopId;
+    }
+
+    public void setShopId(String shopId) {
+        this.shopId = shopId;
+    }
+
+    public String getShopName() {
+        return this.shopName;
+    }
+
+    public void setShopName(String shopName) {
+        this.shopName = shopName;
+    }
+
+    public String getShopEntityId() {
+        return this.shopEntityId;
+    }
+
+    public void setShopEntityId(String shopEntityId) {
+        this.shopEntityId = shopEntityId;
+    }
+
+    public String getShopEntityName() {
+        return this.shopEntityName;
+    }
+
+    public void setShopEntityName(String shopEntityName) {
+        this.shopEntityName = shopEntityName;
+    }
+
+    public String getCreateTime() {
+        return this.createTime;
+    }
+
+    public void setCreateTime(String createTime) {
+        this.createTime = createTime;
+    }
+
+    public String getCTimeStamp() {
+        return this.cTimeStamp;
+    }
+
+    public void setCTimeStamp(String cTimeStamp) {
+        this.cTimeStamp = cTimeStamp;
+    }
+
+    public String getHcTime() {
+        return this.hcTime;
+    }
+
+    public void setHcTime(String hcTime) {
+        this.hcTime = hcTime;
+    }
+
+    public String getHserial() {
+        return this.hserial;
+    }
+
+    public void setHserial(String hserial) {
+        this.hserial = hserial;
+    }
+
+    public String getFixTerminal() {
+        return this.fixTerminal;
+    }
+
+    public void setFixTerminal(String fixTerminal) {
+        this.fixTerminal = fixTerminal;
+    }
+
+    public String getTerminalNumber() {
+        return this.terminalNumber;
+    }
+
+    public void setTerminalNumber(String terminalNumber) {
+        this.terminalNumber = terminalNumber;
+    }
+
+    public String getBillfileName() {
+        return this.billfileName;
+    }
+
+    public void setBillfileName(String billfileName) {
+        this.billfileName = billfileName;
+    }
+
+    public List<String> getBillfileNameHis() {
+        return this.billfileNameHis;
+    }
+
+    public void setBillfileNameHis(List<String> billfileNameHis) {
+        this.billfileNameHis = billfileNameHis;
+    }
+
+    public String getBillNo() {
+        return this.billNo;
+    }
+
+    public void setBillNo(String billNo) {
+        this.billNo = billNo;
+    }
+
+    public String getInterceptTime() {
+        return this.interceptTime;
+    }
+
+    public void setInterceptTime(String interceptTime) {
+        this.interceptTime = interceptTime;
+    }
+
+    public String getShopEntityFullName() {
+        return this.shopEntityFullName;
+    }
+
+    public void setShopEntityFullName(String shopEntityFullName) {
+        this.shopEntityFullName = shopEntityFullName;
+    }
+
+    public String getShopEntityAddress() {
+        return this.shopEntityAddress;
+    }
+
+    public void setShopEntityAddress(String shopEntityAddress) {
+        this.shopEntityAddress = shopEntityAddress;
+    }
+
+    public String getTelephone() {
+        return this.telephone;
+    }
+
+    public void setTelephone(String telephone) {
+        this.telephone = telephone;
+    }
+
+    public String getSaler() {
+        return this.saler;
+    }
+
+    public void setSaler(String saler) {
+        this.saler = saler;
+    }
+
+    public String getCheckstand() {
+        return this.checkstand;
+    }
+
+    public void setCheckstand(String checkstand) {
+        this.checkstand = checkstand;
+    }
+
+    public String getCashier() {
+        return this.cashier;
+    }
+
+    public void setCashier(String cashier) {
+        this.cashier = cashier;
+    }
+
+    public Double getReceivableAmount() {
+        return this.receivableAmount;
+    }
+
+    public void setReceivableAmount(Double receivableAmount) {
+        this.receivableAmount = receivableAmount;
+    }
+
+    public Double getTotalNum() {
+        return this.totalNum;
+    }
+
+    public void setTotalNum(Double totalNum) {
+        this.totalNum = totalNum;
+    }
+
+    public String getBillSerialNumber() {
+        return this.billSerialNumber;
+    }
+
+    public void setBillSerialNumber(String billSerialNumber) {
+        this.billSerialNumber = billSerialNumber;
+    }
+
+    public Double getTotalFee() {
+        return this.totalFee;
+    }
+
+    public void setTotalFee(Double totalFee) {
+        this.totalFee = totalFee;
+    }
+
+    public Double getPaidAmount() {
+        return this.paidAmount;
+    }
+
+    public void setPaidAmount(Double paidAmount) {
+        this.paidAmount = paidAmount;
+    }
+
+    public Double getDiscountAmount() {
+        return this.discountAmount;
+    }
+
+    public void setDiscountAmount(Double discountAmount) {
+        this.discountAmount = discountAmount;
+    }
+
+    public Double getCouponAmount() {
+        return this.couponAmount;
+    }
+
+    public void setCouponAmount(Double couponAmount) {
+        this.couponAmount = couponAmount;
+    }
+
+    public Double getChangeAmount() {
+        return this.changeAmount;
+    }
+
+    public void setChangeAmount(Double changeAmount) {
+        this.changeAmount = changeAmount;
+    }
+
+    public List<String> getSettlementWay() {
+        return this.settlementWay;
+    }
+
+    public void setSettlementWay(List<String> settlementWay) {
+        this.settlementWay = settlementWay;
+    }
+
+    public String getSaleTime() {
+        return saleTime;
+    }
+
+    public void setSaleTime(String saleTime) {
+        this.saleTime = saleTime;
+    }
+
+    public String getMemberCardNumber() {
+        return this.memberCardNumber;
+    }
+
+    public void setMemberCardNumber(String memberCardNumber) {
+        this.memberCardNumber = memberCardNumber;
+    }
+
+    public Double getTotalConsumption() {
+        return this.totalConsumption;
+    }
+
+    public void setTotalConsumption(Double totalConsumption) {
+        this.totalConsumption = totalConsumption;
+    }
+
+    public String getWebsite() {
+        return this.website;
+    }
+
+    public void setWebsite(String website) {
+        this.website = website;
+    }
+
+    public String getBillImage() {
+        return this.billImage;
+    }
+
+    public void setBillImage(String billImage) {
+        this.billImage = billImage;
+    }
+
+    public List<String> getGoodsDetails() {
+        return this.goodsDetails;
+    }
+
+    public void setGoodsDetails(List<String> goodsDetails) {
+        this.goodsDetails = goodsDetails;
+    }
+
+    public String getRoomNo() {
+        return this.roomNo;
+    }
+
+    public void setRoomNo(String roomNo) {
+        this.roomNo = roomNo;
+    }
+
+    public String getCheckinName() {
+        return this.checkinName;
+    }
+
+    public void setCheckinName(String checkinName) {
+        this.checkinName = checkinName;
+    }
+
+    public String getDeskNo() {
+        return this.deskNo;
+    }
+
+    public void setDeskNo(String deskNo) {
+        this.deskNo = deskNo;
+    }
+
+    public Double getConsumeNum() {
+        return this.consumeNum;
+    }
+
+    public void setConsumeNum(Double consumeNum) {
+        this.consumeNum = consumeNum;
+    }
+
+    public String getBillText() {
+        return this.billText;
+    }
+
+    public void setBillText(String billText) {
+         this.billText = billText;
+    }
+
+    public Map<String, String> getCustomRecord() {
+        return this.customRecord;
+    }
+
+    public void setCustomRecord(Map<String, String> customRecord) {
+        this.customRecord = customRecord;
+    }
+
+    public String getBillType() {
+        return this.billType;
+    }
+
+    public void setBillType(String billType) {
+        this.billType = billType;
+    }
+
+    public String getInTime() {
+        return this.inTime;
+    }
+
+    public String getOutTime() {
+        return this.outTime;
+    }
+
+    public void setInTime(String inTime) {
+        this.inTime = inTime;
+    }
+
+    public void setOutTime(String outTime) {
+        this.outTime = outTime;
+    }
+
+    public String getBillMatchKey() {
+        return this.billMatchKey;
+    }
+
+    public void setBillMatchKey(String billMatchKey) {
+        this.billMatchKey = billMatchKey;
+    }
+
+    public String getMatchId() {
+        return this.matchId;
+    }
+
+    public void setMatchId(String matchId) {
+        this.matchId = matchId;
+    }
+
+    public String getPrintMatchType() {
+        return this.printMatchType;
+    }
+
+    public void setPrintMatchType(String printMatchType) {
+        this.printMatchType = printMatchType;
+    }
+
+    public String getTsuuid() {
+        return this.tsuuid;
+    }
+
+    public void setTsuuid(String tsuuid) {
+        this.tsuuid = tsuuid;
+    }
+
+    public String getUploadType() {
+        return this.uploadType;
+    }
+
+    public void setUploadType(String uploadType) {
+        this.uploadType = uploadType;
+    }
+
+    public String getCustomerName() {
+        return this.customerName;
+    }
+
+    public void setCustomerName(String customerName) {
+        this.customerName = customerName;
+    }
+
+    public String getMembershipId() {
+        return this.membershipId;
+    }
+
+    public void setMembershipId(String membershipId) {
+        this.membershipId = membershipId;
+    }
+
+    public String getMemberLevels() {
+        return this.memberLevels;
+    }
+
+    public void setMemberLevels(String memberLevels) {
+        this.memberLevels = memberLevels;
+    }
+
+    public String getPetName() {
+        return this.petName;
+    }
+
+    public void setPetName(String petName) {
+        this.petName = petName;
+    }
+
+    public String getPetNumber() {
+        return this.petNumber;
+    }
+
+    public void setPetNumber(String petNumber) {
+        this.petNumber = petNumber;
+    }
+
+    public String getPrincipal() {
+        return this.principal;
+    }
+
+    public void setPrincipal(String principal) {
+        this.principal = principal;
+    }
+
+    public String getDeposit() {
+        return this.deposit;
+    }
+
+    public void setDeposit(String deposit) {
+        this.deposit = deposit;
+    }
+
+    public String getPrintDate() {
+        return this.printDate;
+    }
+
+    public void setPrintDate(String printDate) {
+        this.printDate = printDate;
+    }
+
+    public String getDefaultInterceptTime() {
+        return this.defaultInterceptTime;
+    }
+
+    public void setDefaultInterceptTime(String defaultInterceptTime) {
+        this.defaultInterceptTime = defaultInterceptTime;
+    }
+
+    public String getModifyType() {
+        return this.modifyType;
+    }
+
+    public void setModifyType(String modifyType) {
+        this.modifyType = modifyType;
+    }
+
+    public String getBillSource() {
+        return this.billSource;
+    }
+
+    public void setBillSource(String billSource) {
+        this.billSource = billSource;
+    }
+
+    public String getQrCode() {
+        return qrCode;
+    }
+
+    public void setQrCode(String qrCode) {
+        this.qrCode = qrCode;
+    }
+
+    public String getIntegralmark() {
+        return integralmark;
+    }
+
+    public void setIntegralmark(String integralmark) {
+        this.integralmark = integralmark;
+    }
+
+    public String getThisintegral() {
+        return thisintegral;
+    }
+
+    public void setThisintegral(String thisintegral) {
+        this.thisintegral = thisintegral;
+    }
+
+    public List<String> getModifyAmountSaleTimeList() {
+        return modifyAmountSaleTimeList;
+    }
+
+    public void setModifyAmountSaleTimeList(List<String> modifyAmountSaleTimeList) {
+        this.modifyAmountSaleTimeList = modifyAmountSaleTimeList;
+    }
+
+    public List<String> getModifyAmountInterceptTimeList() {
+        return modifyAmountInterceptTimeList;
+    }
+
+    public void setModifyAmountInterceptTimeList(List<String> modifyAmountInterceptTimeList) {
+        this.modifyAmountInterceptTimeList = modifyAmountInterceptTimeList;
+    }
+
+    public Double getDefaultReceivableAmount() {
+        return defaultReceivableAmount;
+    }
+
+    public void setDefaultReceivableAmount(Double defaultReceivableAmount) {
+        this.defaultReceivableAmount = defaultReceivableAmount;
+    }
+
+    public Double getDefaultTotalNum() {
+        return defaultTotalNum;
+    }
+
+    public void setDefaultTotalNum(Double defaultTotalNum) {
+        this.defaultTotalNum = defaultTotalNum;
+    }
+
+    public Double getDefaultTotalFee() {
+        return defaultTotalFee;
+    }
+
+    public void setDefaultTotalFee(Double defaultTotalFee) {
+        this.defaultTotalFee = defaultTotalFee;
+    }
+
+    public Double getDefaultPaidAmount() {
+        return defaultPaidAmount;
+    }
+
+    public void setDefaultPaidAmount(Double defaultPaidAmount) {
+        this.defaultPaidAmount = defaultPaidAmount;
+    }
+
+    public Double getDefaultDiscountAmount() {
+        return defaultDiscountAmount;
+    }
+
+    public void setDefaultDiscountAmount(Double defaultDiscountAmount) {
+        this.defaultDiscountAmount = defaultDiscountAmount;
+    }
+
+    public Double getDefaultCouponAmount() {
+        return defaultCouponAmount;
+    }
+
+    public void setDefaultCouponAmount(Double defaultCouponAmount) {
+        this.defaultCouponAmount = defaultCouponAmount;
+    }
+
+    public Double getDefaultChangeAmount() {
+        return defaultChangeAmount;
+    }
+
+    public void setDefaultChangeAmount(Double defaultChangeAmount) {
+        this.defaultChangeAmount = defaultChangeAmount;
+    }
+
+    public Double getDefaultTotalConsumption() {
+        return defaultTotalConsumption;
+    }
+
+    public void setDefaultTotalConsumption(Double defaultTotalConsumption) {
+        this.defaultTotalConsumption = defaultTotalConsumption;
+    }
+
+    public Double getDefaultConsumeNum() {
+        return defaultConsumeNum;
+    }
+
+    public void setDefaultConsumeNum(Double defaultConsumeNum) {
+        this.defaultConsumeNum = defaultConsumeNum;
+    }
+
+    public String getRowKey() {
+        return rowKey;
+    }
+
+    public void setRowKey(String rowKey) {
+        this.rowKey = rowKey;
+    }
+
+    @Override
+    public String toString() {
+        return id + "\t" + rowKey + "\t" + shopId + "\t" + shopName + "\t" + shopEntityId + "\t" + shopEntityName + "\t"
+                + createTime + "\t" + cTimeStamp + "\t" + hcTime + "\t" + hserial + "\t" + fixTerminal + "\t"
+                + terminalNumber + "\t" + billfileName + "\t" + tsuuid + "\t" + billfileNameHis + "\t" + billNo + "\t"
+                + interceptTime + "\t" + shopEntityFullName + "\t" + shopEntityAddress + "\t" + telephone + "\t" + saler
+                + "\t" + checkstand + "\t" + cashier + "\t" + receivableAmount + "\t" + defaultReceivableAmount + "\t"
+                + totalNum + "\t" + defaultTotalNum + "\t" + billSerialNumber + "\t" + totalFee + "\t" + defaultTotalFee
+                + "\t" + paidAmount + "\t" + defaultPaidAmount + "\t" + discountAmount + "\t" + defaultDiscountAmount
+                + "\t" + couponAmount + "\t" + defaultCouponAmount + "\t" + changeAmount + "\t" + defaultChangeAmount
+                + "\t" + settlementWay + "\t" + saleTime + "\t" + memberCardNumber + "\t" + totalConsumption + "\t"
+                + defaultTotalConsumption + "\t" + website + "\t" + billImage + "\t" + goodsDetails + "\t" + roomNo
+                + "\t" + checkinName + "\t" + deskNo + "\t" + consumeNum + "\t" + defaultConsumeNum + "\t" + billText
+                + "\t" + inTime + "\t" + outTime + "\t" + defaultPrintDate + "\t" + defaultInTime + "\t"
+                + defaultOutTime + "\t" + uploadType + "\t" + customRecord + "\t" + billType + "\t" + modifyType + "\t"
+                + billSource + "\t" + analyzPath + "\t" + billMatchKey + "\t" + matchId + "\t" + defaultSaleTime + "\t"
+                + customerName + "\t" + membershipId + "\t" + memberLevels + "\t" + petName + "\t" + petNumber + "\t"
+                + principal + "\t" + deposit + "\t" + printDate + "\t" + defaultInterceptTime + "\t" + printMatchType
+                + "\t" + billMergeKey + "\t" + modifyAmount + "\t" + modifyAmountList + "\t" + modifyAmountSaleTimeList
+                + "\t" + modifyAmountInterceptTimeList + "\t" + uniqueId + "\t" + uniqueIdHis + "\t" + ifqrcode + "\t"
+                + couponNum + "\t" + erpMemberCard + "\t" + voucherType + "\t" + qrCode + "\t" + integralmark + "\t"
+                + thisintegral + "\t" + remarks + "\t" + templateName + "\t" + custName + "\t" + custTaxNo + "\t"
+                + custAdress + "\t" + custBankAccount + "\t" + thirdPartyOrderNo + "\t" + rechargeableCardConsumeAmount
+                + "\t" + defaultRechargeableCardConsumeAmount + "\t" + outOfPocketAmount + "\t"
+                + defaultOutOfPocketAmount + "\t" + rechargeAmount + "\t" + defaultRechargeAmount + "\t" + memberPrice
+                + "\t" + defaultMemberPrice + "\t" + memberDiscountrate + "\t" + defaultMemberDiscountrate + "\t"
+                + memberTotalConsumption + "\t" + defaultMemberTotalConsumption + "\t" + takeout + "\t"
+                + discountDetails;
+    }
+
+    public static BillInfoFmt cloneBill(BillInfo fromBean) {
+        if (null == fromBean) {
+            return null;
+        }
+        BillInfoFmt toBean = new BillInfoFmt();
+        toBean.setId(stringRemove(fromBean.getId()));
+        toBean.setRowKey(stringRemove(fromBean.getRowKey()));
+        toBean.setShopId(stringRemove(fromBean.getShopId()));
+        toBean.setShopName(stringRemove(fromBean.getShopName()));
+        toBean.setShopEntityId(stringRemove(fromBean.getShopEntityId()));
+        toBean.setShopEntityName(stringRemove(fromBean.getShopEntityName()));
+        toBean.setCreateTime(DateTimeUtils.getYmdhmsForNo(fromBean.getCreateTime()));
+        toBean.setCTimeStamp(DateTimeUtils.getYmdhmsForNo(fromBean.getCTimeStamp()));
+        toBean.setHcTime(stringRemove(fromBean.getHcTime()));
+        toBean.setHserial(stringRemove(fromBean.getHserial()));
+        toBean.setFixTerminal(stringRemove(fromBean.getFixTerminal()));
+        toBean.setTerminalNumber(stringRemove(fromBean.getTerminalNumber()));
+        toBean.setBillfileName(stringRemove(fromBean.getBillfileName()));
+        toBean.setTsuuid(stringRemove(fromBean.getTsuuid()));
+        toBean.setBillfileNameHis(fromBean.getBillfileNameHis());
+        toBean.setBillNo(stringRemove(fromBean.getBillNo()));
+        toBean.setInterceptTime(DateTimeUtils.getYmdhmsForNo(fromBean.getInterceptTime()));
+        toBean.setShopEntityFullName(stringRemove(fromBean.getShopEntityFullName()));
+        toBean.setShopEntityAddress(stringRemove(fromBean.getShopEntityAddress()));
+        toBean.setTelephone(stringRemove(fromBean.getTelephone()));
+        toBean.setSaler(stringRemove(fromBean.getSaler()));
+        toBean.setCheckstand(stringRemove(fromBean.getCheckstand()));
+        toBean.setCashier(stringRemove(fromBean.getCashier()));
+        toBean.setReceivableAmount(fromBean.getReceivableAmount());
+        toBean.setDefaultReceivableAmount(fromBean.getDefaultReceivableAmount());
+        toBean.setTotalNum(fromBean.getTotalNum());
+        toBean.setDefaultTotalNum(fromBean.getDefaultTotalNum());
+        toBean.setBillSerialNumber(stringRemove(fromBean.getBillSerialNumber()));
+        toBean.setTotalFee(fromBean.getTotalFee());
+        toBean.setDefaultTotalFee(fromBean.getDefaultTotalFee());
+        toBean.setPaidAmount(fromBean.getPaidAmount());
+        toBean.setDefaultPaidAmount(fromBean.getDefaultPaidAmount());
+        toBean.setDiscountAmount(fromBean.getDiscountAmount());
+        toBean.setDefaultDiscountAmount(fromBean.getDefaultDiscountAmount());
+        toBean.setCouponAmount(fromBean.getCouponAmount());
+        toBean.setDefaultCouponAmount(fromBean.getDefaultCouponAmount());
+        toBean.setChangeAmount(fromBean.getChangeAmount());
+        toBean.setDefaultChangeAmount(fromBean.getDefaultChangeAmount());
+        if (null != fromBean.getSettlementWay()) {
+            List<SettlementWayInfo> rawList = fromBean.getSettlementWay();
+            List<String> list = new ArrayList<>();
+            for (SettlementWayInfo raw : rawList) {
+                list.add(raw.toString());
+            }
+            toBean.setSettlementWay(list);
+        }
+        toBean.setSaleTime(fromBean.getSaleTime());
+        toBean.setMemberCardNumber(stringRemove(fromBean.getMemberCardNumber()));
+        toBean.setTotalConsumption(fromBean.getTotalConsumption());
+        toBean.setDefaultTotalConsumption(fromBean.getDefaultTotalConsumption());
+        toBean.setWebsite(stringRemove(fromBean.getWebsite()));
+        toBean.setBillImage(stringRemove(fromBean.getBillImage()));
+        if (null != fromBean.getGoodsDetails()) {
+            List<GoodsDetailInfo> rawList = fromBean.getGoodsDetails();
+            List<String> list = new ArrayList<>();
+            for (GoodsDetailInfo raw : rawList) {
+                list.add(raw.toString());
+            }
+            toBean.setGoodsDetails(list);
+        }
+        toBean.setRoomNo(stringRemove(fromBean.getRoomNo()));
+        toBean.setCheckinName(stringRemove(fromBean.getCheckinName()));
+        toBean.setDeskNo(stringRemove(fromBean.getDeskNo()));
+        toBean.setConsumeNum(fromBean.getConsumeNum());
+        toBean.setDefaultConsumeNum(fromBean.getDefaultConsumeNum());
+        toBean.setBillText(stringRemove(fromBean.getBillText()));
+        toBean.setInTime(DateTimeUtils.getYmdhmsForNo(fromBean.getInTime()));
+        toBean.setOutTime(DateTimeUtils.getYmdhmsForNo(fromBean.getOutTime()));
+        toBean.setDefaultPrintDate(DateTimeUtils.getYmdhmsForNo(fromBean.getDefaultPrintDate()));
+        toBean.setDefaultInTime(DateTimeUtils.getYmdhmsForNo(fromBean.getDefaultInTime()));
+        toBean.setDefaultOutTime(DateTimeUtils.getYmdhmsForNo(fromBean.getDefaultOutTime()));
+        toBean.setUploadType(stringRemove(fromBean.getUploadType()));
+        toBean.setCustomRecord(fromBean.getCustomRecord());
+        toBean.setBillType(stringRemove(fromBean.getBillType()));
+        toBean.setModifyType(stringRemove(fromBean.getModifyType()));
+        toBean.setBillSource(stringRemove(fromBean.getBillSource()));
+        toBean.setAnalyzPath(stringRemove(fromBean.getAnalyzPath()));
+        toBean.setBillMatchKey(stringRemove(fromBean.getBillMatchKey()));
+        toBean.setMatchId(stringRemove(fromBean.getMatchId()));
+        toBean.setDefaultSaleTime(DateTimeUtils.getYmdhmsForNo(fromBean.getDefaultSaleTime()));
+        toBean.setCustomerName(stringRemove(fromBean.getCustomerName()));
+        toBean.setMembershipId(stringRemove(fromBean.getMembershipId()));
+        toBean.setMemberLevels(stringRemove(fromBean.getMemberLevels()));
+        toBean.setPetName(stringRemove(fromBean.getPetName()));
+        toBean.setPetNumber(stringRemove(fromBean.getPetNumber()));
+        toBean.setPrincipal(stringRemove(fromBean.getPrincipal()));
+        toBean.setDeposit(stringRemove(fromBean.getDeposit()));
+        toBean.setPrintDate(DateTimeUtils.getYmdhmsForNo(fromBean.getPrintDate()));
+        toBean.setDefaultInterceptTime(DateTimeUtils.getYmdhmsForNo(fromBean.getDefaultInterceptTime()));
+        toBean.setPrintMatchType(stringRemove(fromBean.getPrintMatchType()));
+        toBean.setBillMergeKey(stringRemove(fromBean.getBillMergeKey()));
+        toBean.setModifyAmount(fromBean.getModifyAmount());
+        toBean.setModifyAmountList(fromBean.getModifyAmountList());
+        toBean.setModifyAmountSaleTimeList(DateTimeUtils.getYmdhmsForNo(fromBean.getModifyAmountSaleTimeList()));
+        toBean.setModifyAmountInterceptTimeList(
+                DateTimeUtils.getYmdhmsForNo(fromBean.getModifyAmountInterceptTimeList()));
+        toBean.setUniqueId(stringRemove(fromBean.getUniqueId()));
+        toBean.setUniqueIdHis(fromBean.getUniqueIdHis());
+        toBean.setIfqrcode(stringRemove(fromBean.getIfqrcode()));
+        toBean.setCouponNum(stringRemove(fromBean.getCouponNum()));
+        toBean.setErpMemberCard(stringRemove(fromBean.getErpMemberCard()));
+        toBean.setVoucherType(stringRemove(fromBean.getVoucherType()));
+        toBean.setQrCode(stringRemove(fromBean.getQrCode()));
+        toBean.setIntegralmark(stringRemove(fromBean.getIntegralmark()));
+        toBean.setThisintegral(stringRemove(fromBean.getThisintegral()));
+        toBean.setRemarks(stringRemove(fromBean.getRemarks()));
+        toBean.setTemplateName(stringRemove(fromBean.getTemplateName()));
+        toBean.setCustName(stringRemove(fromBean.getCustName()));
+        toBean.setCustName(stringRemove(fromBean.getCustTaxNo()));
+        toBean.setCustAdress(stringRemove(fromBean.getCustAdress()));
+        toBean.setCustBankAccount(stringRemove(fromBean.getCustBankAccount()));
+        toBean.setThirdPartyOrderNo(stringRemove(fromBean.getThirdPartyOrderNo()));
+        toBean.setRechargeableCardConsumeAmount(fromBean.getRechargeableCardConsumeAmount());
+        toBean.setDefaultRechargeableCardConsumeAmount(fromBean.getDefaultRechargeableCardConsumeAmount());
+        toBean.setOutOfPocketAmount(fromBean.getOutOfPocketAmount());
+        toBean.setDefaultOutOfPocketAmount(fromBean.getDefaultOutOfPocketAmount());
+        toBean.setRechargeAmount(fromBean.getRechargeAmount());
+        toBean.setDefaultRechargeAmount(fromBean.getDefaultRechargeAmount());
+        toBean.setMemberPrice(fromBean.getMemberPrice());
+        toBean.setDefaultMemberPrice(fromBean.getDefaultMemberPrice());
+        toBean.setMemberDiscountrate(fromBean.getMemberDiscountrate());
+        toBean.setDefaultMemberDiscountrate(fromBean.getDefaultMemberDiscountrate());
+        toBean.setMemberTotalConsumption(fromBean.getMemberTotalConsumption());
+        toBean.setDefaultMemberTotalConsumption(fromBean.getDefaultMemberTotalConsumption());
+        toBean.setTakeout(stringRemove(fromBean.getTakeout()));
+        if (null != fromBean.getDiscountDetails()) {
+            List<DiscountDetailsInfo> rawList = fromBean.getDiscountDetails();
+            List<String> list = new ArrayList<>();
+            for (DiscountDetailsInfo raw : rawList) {
+                list.add(raw.toString());
+            }
+            toBean.setDiscountDetails(list);
+        }
+        return toBean;
+    }
+
+    /**
+     * 原始数据格式化处理，待完善
+     * 
+     * @param jsonStr
+     * @return
+     */
+    private static String stringRemove(String strVal) {
+        if (StringUtils.isEmpty(strVal)) {
+            return "";
+        }
+        strVal = strVal.replace("\t", "");
+        strVal = strVal.replace("\n", "");
+        strVal = strVal.replace("\r", "");
+        return strVal;
+    }
+}
+复制代码
+ 
+
+4.5、BCD裁剪实体类
+
+复制代码
+package com.mengyao.graph.etl.apps.dashboard.beans;
+
+import java.io.Serializable;
+
+/**
+ * Bill Consumer Dashboard Bean
+ * @author mengyao
+ *
+ */
+public class BCD implements Serializable {
+    private static final long serialVersionUID = 1749406742944513387L;
+    private String billId;
+    private double receivableAmount;
+    private String saleTime;
+    private String sdt;//yyyyMMdd
+    private int hour;
+    private String billType;
+    private String shopId;
+    private String shopEntityId;
+    public BCD() {
+        super();
+    }
+    public BCD(String billId, double receivableAmount, String saleTime, String billType, String shopId, String shopEntityId) {
+        super();
+        this.billId = billId;
+        this.receivableAmount = receivableAmount;
+        this.saleTime = saleTime;
+        setDateTime(saleTime);
+        this.billType = billType;
+        this.shopId = shopId;
+        this.shopEntityId = shopEntityId;
+    }
+    public String getBillId() {
+        return billId;
+    }
+    public void setBillId(String billId) {
+        this.billId = billId;
+    }
+    public double getReceivableAmount() {
+        return receivableAmount;
+    }
+    public void setReceivableAmount(double receivableAmount) {
+        this.receivableAmount = receivableAmount;
+    }
+    public String getSaleTime() {
+        return saleTime;
+    }
+    public void setSaleTime(String saleTime) {
+        this.saleTime = saleTime;
+        setDateTime(saleTime);
+    }
+    public String getSdt() {
+        return sdt;
+    }
+    public void setSdt(String sdt) {
+        this.sdt = sdt;
+    }
+    public int getHour() {
+        return hour;
+    }
+    public void setHour(int hour) {
+        this.hour = hour;
+    }
+    public String getBillType() {
+        return billType;
+    }
+    public void setBillType(String billType) {
+        this.billType = billType;
+    }
+    public String getShopId() {
+        return shopId;
+    }
+    public void setShopId(String shopId) {
+        this.shopId = shopId;
+    }
+    public String getShopEntityId() {
+        return shopEntityId;
+    }
+    public void setShopEntityId(String shopEntityId) {
+        this.shopEntityId = shopEntityId;
+    }
+    private void setDateTime(String saleTime) {
+        if (null!=saleTime&&saleTime.length()==17) {
+            this.sdt = saleTime.substring(0, 8);
+            this.hour = Integer.parseInt(saleTime.substring(8, 10));
+        }
+    }
+    @Override
+    public String toString() {
+        return  billId + "\t" + receivableAmount + "\t" + saleTime + "\t" + sdt + "\t" + billType + "\t" + shopId + "\t" + shopEntityId;
+    }
+    
+}
+复制代码
+ 
+
+4.6、销售分析业务实现类
+
+复制代码
+package com.mengyao.graph.etl.apps.dashboard.service;
+
+import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Set;
+
+import org.apache.spark.sql.Column;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.functions;
+
+import com.alibaba.fastjson.JSON;
+import com.alibaba.fastjson.JSONObject;
+import com.mengyao.graph.etl.apps.dashboard.beans.AreaProjSale;
+import com.mengyao.graph.etl.apps.dashboard.beans.AreaSaleTrendAll;
+import com.mengyao.graph.etl.apps.dashboard.beans.PeakTime;
+import com.mengyao.graph.etl.apps.dashboard.beans.ProjectTypeShopNumber;
+import com.mengyao.graph.etl.apps.dashboard.beans.ShopSaleRank;
+import com.mengyao.graph.etl.apps.dashboard.beans.TotalRefund;
+import com.mengyao.graph.etl.apps.dashboard.beans.TotalSale;
+import com.mengyao.graph.etl.apps.dashboard.beans.TotalSettlementBillNumber;
+import com.mengyao.utils.RedisUtil;
+
+
+/**
+ * 大屏指标分析
+ * @author mengyao
+ *
+ */
+public class SaleAnalysisService implements Serializable {
+
+    private static final long serialVersionUID = 8289368096001689148L;
+    //解决区域名称hash重复问题
+    private static final String SALT="aAb12";
+
+    /**
+     * 每日重置大屏指标值
+     */
+    @Deprecated
+    public void reset() {
+        RedisUtil.setObject("dtsbn_6", "{\"结账单数\":{\"val\":7270}}\"");
+        RedisUtil.setObject("dpt_7", "{\"高峰时段\":{\"val\":13}}\"");
+        RedisUtil.setObject("dtr_5", "{\"退款金额\":{\"val\":7301.8}}\"");
+        RedisUtil.setObject("dts_4", "{\"总销售额\":{\"val\":1300523.8000000005}}\"");
+        RedisUtil.setObject("curDay", "20190227\"");
+        RedisUtil.setObject("dastfa_2_20190227", "{\"各区域销售额发展趋势\":{\"重庆天地\":[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,9.5,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0],\"创智天地\":[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,43.3,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0],\"上海瑞虹\":[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,16.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0],\"上海新天地\":[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,553.75,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]}}\"");
+        RedisUtil.setObject("dasp_1", "{\"各区域销售额占比\":{\"重庆天地\":[{\"bn\":1,\"n\":\"重庆天地\",\"sa\":9.5}],\"创智天地\":[{\"bn\":3,\"n\":\"壹方\",\"sa\":43.3}],\"上海新天地\":[{\"bn\":4,\"n\":\"新天地时尚购物中心\",\"sa\":152.0},{\"bn\":3,\"n\":\"上海新天地南里北里\",\"sa\":74.0},{\"bn\":2,\"n\":\"湖滨道购物中心\",\"sa\":100.0},{\"bn\":10,\"n\":\"新天地广场\",\"sa\":227.75}],\"上海瑞虹\":[{\"bn\":1,\"n\":\"瑞虹天地星星堂\",\"sa\":16.0}]}}\"");
+        RedisUtil.setObject("dpc_8", "{\"各项目销售额对比\":{\"重庆天地\":[{\"bn\":1,\"n\":\"重庆天地\",\"sa\":9.5}],\"创智天地\":[{\"bn\":3,\"n\":\"壹方\",\"sa\":43.3}],\"上海新天地\":[{\"bn\":4,\"n\":\"新天地时尚购物中心\",\"sa\":152.0},{\"bn\":3,\"n\":\"上海新天地南里北里\",\"sa\":74.0},{\"bn\":2,\"n\":\"湖滨道购物中心\",\"sa\":100.0},{\"bn\":10,\"n\":\"新天地广场\",\"sa\":227.75}],\"上海瑞虹\":[{\"bn\":1,\"n\":\"瑞虹天地星星堂\",\"sa\":16.0}]}}\"");
+        RedisUtil.setObject("dpac_10", "{\"各项目单均消费\":{\"重庆天地\":[{\"bn\":1,\"n\":\"重庆天地\",\"sa\":9.5}],\"创智天地\":[{\"bn\":3,\"n\":\"壹方\",\"sa\":43.3}],\"上海新天地\":[{\"bn\":4,\"n\":\"新天地时尚购物中心\",\"sa\":152.0},{\"bn\":3,\"n\":\"上海新天地南里北里\",\"sa\":74.0},{\"bn\":2,\"n\":\"湖滨道购物中心\",\"sa\":100.0},{\"bn\":10,\"n\":\"新天地广场\",\"sa\":227.75}],\"上海瑞虹\":[{\"bn\":1,\"n\":\"瑞虹天地星星堂\",\"sa\":16.0}]}}\"");
+        RedisUtil.setObject("dsfst_9", "{\"店铺销售排行\":[{\"pn\":\"新天地时尚购物中心\",\"sa\":152.0,\"sn\":\"GREYBOX COFFEE\"},{\"pn\":\"新天地广场\",\"sa\":114.75,\"sn\":\"Arabica\"},{\"pn\":\"湖滨道购物中心\",\"sa\":100.0,\"sn\":\"LOKAL\"},{\"pn\":\"上海新天地南里北里\",\"sa\":74.0,\"sn\":\"哈肯铺_手感烘焙\"},{\"pn\":\"壹方\",\"sa\":60.3,\"sn\":\"新一天便利\"},{\"pn\":\"新天地广场\",\"sa\":41.0,\"sn\":\"奈雪的茶\"},{\"pn\":\"新天地广场\",\"sa\":39.0,\"sn\":\"蒲石小点\"},{\"pn\":\"新天地广场\",\"sa\":18.0,\"sn\":\"Fresh_Every_Day\"},{\"pn\":\"瑞虹天地星星堂\",\"sa\":16.0,\"sn\":\"老盛昌\"},{\"pn\":\"新天地广场\",\"sa\":15.0,\"sn\":\"多几谷\"}]}\"");
+        RedisUtil.setObject("dptsc_11", "{\"各项目业态销售额对比\":{\"上海新天地南里北里\":[{\"n\":\"餐饮\",\"sa\":74.0,\"sn\":3}],\"新天地广场\":[{\"n\":\"餐饮\",\"sa\":227.75,\"sn\":10}],\"重庆天地\":[{\"n\":\"其它\",\"sa\":9.5,\"sn\":0}],\"湖滨道购物中心\":[{\"n\":\"餐饮\",\"sa\":100.0,\"sn\":2}],\"壹方\":[{\"n\":\"餐饮\",\"sa\":43.3,\"sn\":3}],\"瑞虹天地星星堂\":[{\"n\":\"餐饮\",\"sa\":16.0,\"sn\":1}],\"新天地时尚购物中心\":[{\"n\":\"餐饮\",\"sa\":152.0,\"sn\":4}]}}\"");
+        RedisUtil.setObject("dpsn_12", "{\"各项目店铺数量\":{\"上海新天地南里北里\":[{\"n\":\"餐饮\",\"sa\":74.0,\"sn\":3}],\"新天地广场\":[{\"n\":\"餐饮\",\"sa\":227.75,\"sn\":10}],\"重庆天地\":[{\"n\":\"其它\",\"sa\":9.5,\"sn\":0}],\"湖滨道购物中心\":[{\"n\":\"餐饮\",\"sa\":100.0,\"sn\":2}],\"壹方\":[{\"n\":\"餐饮\",\"sa\":43.3,\"sn\":3}],\"瑞虹天地星星堂\":[{\"n\":\"餐饮\",\"sa\":16.0,\"sn\":1}],\"新天地时尚购物中心\":[{\"n\":\"餐饮\",\"sa\":152.0,\"sn\":4}]}}\"");
+    }
+    
+    /**
+     * 总销售额
+     * @param ds
+     */
+    public void totalSale(Dataset<Row> bill) {
+        Row[] rows = (Row[])bill
+                .filter("billType=1 and receivableAmount>=0")
+                .agg(functions.sum(new Column("receivableAmount")).alias("totalSale"), functions.count("receivableAmount"))
+                .head(1);
+        Map<String, TotalSale> map = new HashMap<String, TotalSale>();
+        double totalSale=0D;
+        if(rows.length>0){
+            Row row = rows[0];
+            if (!row.isNullAt(0)) {
+                //销售额
+                totalSale=row.getDouble(0);
+            }
+            if (!row.isNullAt(1)) {
+                //结账单数
+                totalSettlementBillNumber(new TotalSettlementBillNumber(row.getLong(1)));
+            }
+        }
+        map.put("总销售额", new TotalSale(totalSale));
+        String str = JSONObject.toJSONString(map);
+        System.out.println("====####--totalSale##" + str);
+        // 将总销售额存入redis
+        RedisUtil.setObject("dts_4", str);
+    }
+    
+    /**
+     * 退款金额
+     * @param ds
+     */
+    public void totalRefund(Dataset<Row> bill) {
+        Row[] rows = (Row[]) bill
+                .filter("((billType=6) or (billType=1 and receivableAmount<0))")
+                .agg(functions.sum(functions.abs(new Column("receivableAmount"))).alias("totalSale"))
+                .head(1);
+        Map<String, TotalRefund> map=new HashMap<>();
+        map.put("退款金额", new TotalRefund(0));
+        if(rows.length>0){
+            Row row = rows[0];
+            if (!row.isNullAt(0)) {
+                map.put("退款金额", new TotalRefund(row.getDouble(0)));
+            }
+        }
+        String str=JSONObject.toJSONString(map);
+        System.out.println("====####--totalRefund##"+str);
+        //将退款金额存入redis
+        RedisUtil.setObject("dtr_5",str);
+    }
+    
+    /**
+     * 高峰时段
+     *  1、时段：小时；
+     *    2、高峰：当日每小时结账单数累计最大；
+     *    3、高峰时段：所有mall累计每小时结账单数；
+     * @param ds
+     * @return {"高峰时段":{"val":12}}
+     */
+    public void peakTime(Dataset<Row> bill) {
+        //账单表本身有mallid(shopId) 因此无需关联店铺表
+        Map<String, PeakTime> map=new HashMap<>();
+        map.put("高峰时段", new PeakTime(8));
+        Row[] rows = (Row[])bill
+                .filter("billType=1")
+                .groupBy("hour")
+                .agg(functions.sum("receivableAmount").alias("totalSale"))
+                .orderBy(new Column("totalSale").desc())
+                .limit(1)
+                .head(1);
+        if(rows.length>0){
+            Row row = rows[0];
+            if (!row.isNullAt(0)) {
+                map.put("高峰时段", new PeakTime(row.getAs(0)));
+            }
+        }
+        String str=JSONObject.toJSONString(map);
+        System.out.println("====####--peakTime##"+str);
+        //将高峰时段放入redis
+        RedisUtil.setObject("dpt_7", str);
+    }
+    
+    /**
+     * 各区域销售发展趋势-多个区域（每个区域下有多个mall）当日0点~24点的累计销售额
+     * @param bill
+     * @param ruian
+     * @param curDay
+     */
+    public void areaSaleTrendForAll(Dataset<Row> bill, Dataset<Row> ruian,Set<String> areaSet, String curDay) {
+        Row[] rows = (Row[])bill
+                .filter("billType=1 and receivableAmount>0")
+                .join(ruian, bill.col("shopId").equalTo(ruian.col("rmid")), "leftouter")
+                .groupBy("area_cn", "hour")
+                .agg(functions.sum("receivableAmount").alias("areaDayHourSale"))
+                .orderBy("areaDayHourSale")
+                .select("area_cn","areaDayHourSale","hour")
+                .collect();
+//        Map<String, Map<String,Map<Integer, Double>>> map = new HashMap<>();
+        Map<String, Map<String,Collection<Double>>> map = new HashMap<>();
+        Map<String,AreaSaleTrendAll> maps=new HashMap<>();
+        if(rows.length>0){
+            for (Row row : rows) {
+                String areaCn=null;
+                double areaDayHourSale=0D;
+                int saleHour=0;
+                if(!row.isNullAt(0)){
+                    areaCn=row.getString(0);
+                }
+                if(!row.isNullAt(1)){
+                    areaDayHourSale=row.getDouble(1);
+                }
+                if(!row.isNullAt(2)){
+                    saleHour=row.getInt(2);
+                }
+                if(maps.containsKey(areaCn+SALT)){
+                    AreaSaleTrendAll ast=maps.get(areaCn+SALT);
+                    ast.getVals().put(saleHour, areaDayHourSale);
+                }else{
+                    HashMap<Integer,Double> vals=new HashMap<Integer,Double>();
+                    vals.put(saleHour, areaDayHourSale);
+                    maps.put(areaCn+SALT, new AreaSaleTrendAll(areaCn, saleHour, areaDayHourSale));
+                }
+            }
+        }
+        //填充没有销售额的区域记录，使数据更加完整。
+        areaSet.forEach(areaCn->{
+            if(!maps.containsKey(areaCn+SALT)){
+                maps.put(areaCn+SALT, new AreaSaleTrendAll(areaCn));
+            }
+        });
+
+        System.out.println("==####========填充hou====begin=====================");
+        for (String key:maps.keySet()) {
+            System.out.println("Key:"+key);
+        }
+        System.out.println("==####========填充hou=====end====================");
+        
+//        Map<String,Map<Integer, Double>> rs=new HashMap<>();
+//        for(AreaSaleTrendAll asta:maps.values()){
+//            rs.put(asta.getAreaCn(), asta.getVals());
+//        }
+        Map<String,Collection<Double>> rs=new HashMap<>();
+        for(AreaSaleTrendAll asta:maps.values()){
+            rs.put(asta.getAreaCn(), asta.getVals().values());
+        }
+        map.put("各区域销售额发展趋势", rs);
+        //转成json 字符串
+        String str=JSONObject.toJSONString(map);
+        System.out.println("====####--areaSaleTrendForAll##"+str);
+        //放入redis
+        RedisUtil.setObject("dastfa_2_"+curDay, str);
+        //维护redis中最新日期
+        if(!RedisUtil.existsObject("curDay")){//如果为空，说明是第一次运行，直接将当前日期设置到redis中
+            RedisUtil.setObject("curDay", curDay);
+        }else{
+            String curDayRedis=(String) RedisUtil.getObject("curDay");
+            if((curDayRedis.compareTo(curDay))<0){//说明当前日期大于redis中的日期，更新
+                RedisUtil.setObject("curDay", curDay);
+            }
+        }
+    }
+
+    /**
+     * 各项目销售额对比
+     *     1、各项目：各个mall；
+     *    2、单一项目销售额：mall的当日开始营业时间到当前时间累计销售额；
+     */
+    public void projectContrast(Dataset<Row> bill, Dataset<Row> ruian,Map<String, Set<String>> ruianMallAll) {
+        Row[] rows = (Row[])bill
+                .filter("billType=1 and receivableAmount>0")
+                .join(ruian, bill.col("shopId").equalTo(ruian.col("rmid")), "leftouter")
+                .groupBy("name", "area_cn")
+                .agg(functions.sum("receivableAmount").alias("mallDaySale"), functions.count("receivableAmount").alias("mallDayBillNum"))
+//                .orderBy("area_cn")
+                .select("name","area_cn","mallDaySale","mallDayBillNum")
+                .collect();
+        Map<String,List<AreaProjSale>> rs=new HashMap<>();
+        if(rows.length>0) {
+            for (Row row : rows) {
+                String mallName=null;
+                String areaCn=null;
+                double mallDaySale=0D;
+                long mallDayBillNum=0L;
+                AreaProjSale obj=new AreaProjSale();
+                if(!row.isNullAt(0)){//项目、mall的名称
+                    mallName=row.getString(0);
+                    obj.setN(mallName);
+                }
+                if(!row.isNullAt(1)){//区域名称
+                    areaCn=row.getString(1);
+                }
+                if(!row.isNullAt(2)){//mall的日销售额
+                    mallDaySale=row.getDouble(2);
+                    obj.setSa(mallDaySale);
+                }
+                if(!row.isNullAt(3)){//mall的日结账单数
+                    mallDayBillNum=row.getLong(3);
+                    obj.setBn(mallDayBillNum);
+                }
+                //判断是否有该区域
+                if(rs.containsKey(areaCn)){
+                    rs.get(areaCn).add(obj);
+                }else{//不存在该区域
+                    List<AreaProjSale> list=new ArrayList<>();
+                    list.add(obj);
+                    rs.put(areaCn, list);
+                }
+            }
+        }
+        //填充未产生账单的数据，默认0
+        //获取全部瑞安的区域和mallName的集合
+        Set<Entry<String,Set<String>>> entrySet = ruianMallAll.entrySet();
+        for(Map.Entry<String, Set<String>> entry:entrySet){
+            String areaCn=entry.getKey();//获取区域名称
+            //获取每个区域的标准mall的集合
+            Set<String> mallSet=entry.getValue();
+            if(rs.containsKey(areaCn)){//实际数据中已经存在该区域相关数据
+                //判断实际数据mall是否完整
+                //用来存放实际数据中mallname的集合
+                Set<String> mallSetCur=new HashSet<>();
+                //用来存放没有账单的mall的集合
+                Set<String> mallSetNew=new HashSet<>();
+                //遍历该区域下实际数据集合 并填充set
+                for(AreaProjSale obj:rs.get(areaCn)){
+                    mallSetCur.add(obj.getN());
+                }
+                //求两个set的差集合  将标准数据放入
+                mallSetNew.addAll(mallSet);
+                //求差集合  标准数据-实际数据 得到差集
+                mallSetNew.removeAll(mallSetCur);
+                //遍历差集合 ，填充默认值
+                mallSetNew.forEach(mn->{
+                    rs.get(areaCn).add(new AreaProjSale(mn));
+                });
+            }else{//该区域不存在
+                //便利该区域下标准mall集合，逐个放入
+                List<AreaProjSale> list=new ArrayList<>();
+                mallSet.forEach(mn->{
+                    list.add(new AreaProjSale(mn));
+                });
+                rs.put(areaCn, list);
+            }
+        }
+        //各区域销售额占比
+        areaSaleProportion(rs);
+        //各区域单均消费
+        projectAvgConsumer(rs);
+        //转成json
+        Map<String, Map<String,List<AreaProjSale>>> pmap=new HashMap<>();
+        pmap.put("各项目销售额对比", rs);
+        //转成json
+        String str=JSONObject.toJSONString(pmap);
+        System.out.println("====####--projectContrast##"+str);
+        //1 8各项目销售额对比dpc_8 
+        RedisUtil.setObject("dpc_8", str);
+    }
+    
+    /**
+     * 所有mall中销售额最高的top10店铺
+     * @param bill
+     * @param shop
+     * @param ruian
+     */
+    public void saleForShopTop10(Dataset<Row> bill, Dataset<Row> shop, Dataset<Row> ruian) {
+        Row[] rows = (Row[])bill
+                .filter("billType=1 and receivableAmount>0")
+                .join(shop, bill.col("shopEntityId").equalTo(shop.col("shop_entity_id")), "leftouter")
+                .join(ruian, bill.col("shopId").equalTo(ruian.col("rmid")), "leftouter")
+                .groupBy("shop_entity_name", "name")
+                .agg(functions.sum("receivableAmount").alias("shopDaySale"))
+                .orderBy(new Column("shopDaySale").desc())
+                .select("shop_entity_name","name","shopDaySale")
+                .limit(10)
+                .head(10);
+        List<ShopSaleRank> ssrList=new LinkedList<>();
+        if(rows.length>0) {
+            for (Row row : rows) {
+                ShopSaleRank ssr=new ShopSaleRank();
+                if(!row.isNullAt(0)){//店铺名称
+                    ssr.setSn(row.getString(0));
+                }
+                if(!row.isNullAt(1)){//项目/mall名称
+                    ssr.setPn(row.getString(1));
+                }
+                if(!row.isNullAt(2)){//店铺日销售额
+                    ssr.setSa(row.getDouble(2));
+                }
+                ssrList.add(ssr);
+            }
+        }
+        //转成json
+        Map<String, List<ShopSaleRank>> pmap=new HashMap<>();
+        pmap.put("店铺销售排行", ssrList);
+        String str=JSON.toJSONString(pmap);
+        System.out.println("====####--saleForShopTop10##"+str);
+        //将10个店铺日销售额放入redis
+        RedisUtil.setObject("dsfst_9",str);
+    }
+    
+    /**
+     * 各项目业态销售额对比
+     * 
+     * @param session
+     * @param beginYMDH
+     * @param endYMDH
+     */
+    public void projectTypeSaleContrast(Dataset<Row> bill, Dataset<Row> shop, Dataset<Row> type, Dataset<Row> ruian,
+            Set<String> areaSet,Set<String> mallSet,Set<String> ruianTypeAll) {
+        Row[] rows = (Row[])bill
+                .filter("billType=1 and receivableAmount>0")
+                .join(shop, shop.col("shop_entity_id").equalTo(bill.col("shopEntityId")), "leftouter")
+                .join(type, type.col("id").equalTo(shop.col("shop_entity_type_root")), "leftouter")
+                .join(ruian, ruian.col("rmid").equalTo(bill.col("shopId")))
+                .groupBy("name", "shop_type_name")
+                .agg(functions.sum("receivableAmount").alias("shopTypeDaySale"), functions.countDistinct("shop_entity_id").alias("shopNum"))
+                .select("name","shop_type_name","shopTypeDaySale","shopNum")
+                .collect();
+        Map<String,List<ProjectTypeShopNumber>> map=new HashMap<>();
+        if(rows.length>0) {
+            for (Row row : rows) {
+                ProjectTypeShopNumber pac=new ProjectTypeShopNumber();
+                String mallName=null;
+                if(!row.isNullAt(0)){//项目、mall名称
+                    mallName=row.getString(0);
+                }
+                if(!row.isNullAt(1)){//业态名称
+                    pac.setN(row.getString(1));
+                }else{
+                    pac.setN("其它");
+                }
+                if(!row.isNullAt(2)){//mall的业态日销售额
+                    pac.setSa(row.getDouble(2));
+                }
+                if(!row.isNullAt(3)){//mall的业态店铺数量
+                    pac.setSn(row.getLong(3));
+                }
+                if(map.containsKey(mallName)){//更新map中的list列表
+                    List<ProjectTypeShopNumber> pacList=map.get(mallName);
+                    pacList.add(pac);
+                }else{//新的mall 新建列表放入map
+                    List<ProjectTypeShopNumber> pacList=new LinkedList<>();
+                    pacList.add(pac);
+                    map.put(mallName, pacList);
+                }
+            }
+        }
+        //为没有产生账单的业态或mall填充默认数据，是数据看起来完整
+        mallSet.forEach(mallName->{
+            if(!map.containsKey(mallName)) {//没有账单的mall
+                List<ProjectTypeShopNumber> list=new ArrayList<>();
+                //遍历全量业态，进行填充
+                ruianTypeAll.forEach(type_->{
+                    list.add(new ProjectTypeShopNumber(type_,0.0,0));
+                });
+                map.put(mallName,list);
+            }else{//有账单的mall
+                //用来获取实际账单数据中已存在的业态
+                Set<String> ruianTypeCur = new HashSet<>();
+                //用来存放没有账单的业态
+                Set<String> ruianTypeNew = new HashSet<>();
+                //遍历数据，提取实际数据中的业态
+                for(ProjectTypeShopNumber obj:map.get(mallName)){
+                    ruianTypeCur.add(obj.getN());
+                }
+                //将产生账单的业态和全量业态求差即
+                ruianTypeNew.addAll(ruianTypeAll);
+                ruianTypeNew.removeAll(ruianTypeCur);
+                //将没有实际账单的业态数据填从（默认值填充）                            
+                for(String type_:ruianTypeNew){
+                    map.get(mallName).add(new ProjectTypeShopNumber(type_,0.0,0));
+                }
+            }
+        });
+        //为==各项目店铺数量==填充数据
+        projectShopNumber(map);
+        //转成json
+        Map<String, Map<String,List<ProjectTypeShopNumber>>> pmap=new HashMap<>();
+        pmap.put("各项目业态销售额对比", map);
+        String str=JSON.toJSONString(pmap);
+        System.out.println("====####--projectTypeSaleContrast##"+str);
+        RedisUtil.setObject("dptsc_11",str);
+    }
+    
+    //=============================================================================================================
+    /**
+     * 结账单数
+     * 
+     * @param tsb
+     */
+    public void totalSettlementBillNumber(TotalSettlementBillNumber tsb) {
+         Map<String, TotalSettlementBillNumber> map=new HashMap<>();
+         map.put("结账单数", tsb);
+         String str=JSONObject.toJSONString(map);
+         System.out.println("====####--totalSettlementBillNumber##"+str);
+         //将结账单数放入redis
+         RedisUtil.setObject("dtsbn_6", str);
+    }
+    
+    /**
+     * 各区域销售占比
+     * 直接将数据封装成json,无需额外处理
+     * 
+     * @param rs 已经封装好的数据，请参考{@link com.mengyao.graph.etl.apps.dashboard.service.SaleAnalysisService.projectContrast()}
+     */
+    private void areaSaleProportion(Map<String, List<AreaProjSale>> rs) {
+        Map<String, Map<String,List<AreaProjSale>>> pmap=new HashMap<>();
+        pmap.put("各区域销售额占比 ", rs);
+        //转成json
+        String str=JSONObject.toJSONString(pmap);
+        System.out.println("====####--areaSaleProportion##"+str);
+        //各区域销售占比dasp_1
+        RedisUtil.setObject("dasp_1", str);
+    }
+    
+    /**
+     *  各项目单均消费
+     *  版本二 营业时间24小时制
+     *    1、各项目：各个mall；
+     *    2、单均消费：mall的当日开始营业时间到当前时间累计销售额，应收额累计/结账单累计；
+     *  直接将数据封装成json，无需额外处理
+     *  
+     *  @param rs 已经封装好的数据，请参考{@link com.mengyao.graph.etl.apps.dashboard.service.SaleAnalysisService.projectContrast()}
+     */
+    private void projectAvgConsumer(Map<String, List<AreaProjSale>> rs) {
+        Map<String, Map<String,List<AreaProjSale>>> pmap=new HashMap<>();
+        pmap.put("各项目单均消费", rs);
+        //转成json
+        String str=JSONObject.toJSONString(pmap);
+        System.out.println("====####--projectAvgConsumer##"+str);
+        //10各项目单均消费dpac_10
+        RedisUtil.setObject("dpac_10", str);        
+    }
+    
+    /**
+     * 各项目店铺数量
+     * 数据填充自上面的方法
+     * 
+     * {@link projectTypeSaleContrast(SparkSession session,String beginYMDH,String endYMDH)}
+     */
+    private void projectShopNumber(Map<String,List<ProjectTypeShopNumber>> map) {
+        //转成json
+        Map<String, Map<String,List<ProjectTypeShopNumber>>> pmap=new HashMap<>();
+        pmap.put("各项目店铺数量", map);
+        String str=JSON.toJSONString(pmap);
+        System.out.println("====####--projectShopNumber##"+str);
+        RedisUtil.setObject("dpsn_12",str);
+    }
+    
+    
+}
