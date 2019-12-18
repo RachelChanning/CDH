@@ -1,0 +1,250 @@
+spark写数据入kafka示范代码
+一.pom文件
+
+<?xml version="1.0" encoding="UTF-8"?>
+
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>cn.piesat</groupId>
+  <artifactId>SparkToKafka</artifactId>
+  <version>1.0-SNAPSHOT</version>
+
+  <name>SparkToKafka</name>
+  <!-- FIXME change it to the project's website -->
+  <url>http://www.example.com</url>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <maven.compiler.source>1.7</maven.compiler.source>
+    <maven.compiler.target>1.7</maven.compiler.target>
+    <spark.version>2.1.0</spark.version>
+    <hadoop.version>2.7.4</hadoop.version>
+    <kafka.version>1.0.0</kafka.version>
+  </properties>
+
+  <dependencies>
+    <!--spark框架开始-->
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-core_2.11</artifactId>
+      <version>${spark.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-sql_2.11</artifactId>
+      <version>${spark.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-hive_2.11</artifactId>
+      <version>${spark.version}</version>
+      <exclusions>
+        <exclusion>
+          <artifactId>commons-logging</artifactId>
+          <groupId>commons-logging</groupId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-streaming_2.11</artifactId>
+      <version>${spark.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-client</artifactId>
+      <version>${hadoop.version}</version>
+      <exclusions>
+        <exclusion>
+          <artifactId>commons-logging</artifactId>
+          <groupId>commons-logging</groupId>
+        </exclusion>
+        <exclusion>
+          <artifactId>slf4j-log4j12</artifactId>
+          <groupId>org.slf4j</groupId>
+        </exclusion>
+        <exclusion>
+          <artifactId>log4j</artifactId>
+          <groupId>log4j</groupId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-streaming-kafka-0-10_2.11</artifactId>
+      <version>2.1.0</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.kafka</groupId>
+      <artifactId>kafka_2.11</artifactId>
+      <version>${kafka.version}</version>
+      <exclusions>
+        <exclusion>
+          <artifactId>slf4j-log4j12</artifactId>
+          <groupId>org.slf4j</groupId>
+        </exclusion>
+        <exclusion>
+          <artifactId>log4j</artifactId>
+          <groupId>log4j</groupId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.hbase</groupId>
+      <artifactId>hbase</artifactId>
+      <version>1.2.6</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.hbase</groupId>
+      <artifactId>hbase-client</artifactId>
+      <version>1.0.2</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.hbase</groupId>
+      <artifactId>hbase-server</artifactId>
+      <version>1.0.2</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.hbase</groupId>
+      <artifactId>hbase-common</artifactId>
+      <version>1.0.2</version>
+    </dependency>
+
+    <!--spark框架结束-->
+    <dependency>
+      <groupId>com.alibaba</groupId>
+      <artifactId>fastjson</artifactId>
+      <version>1.2.47</version>
+    </dependency>
+    <dependency>
+      <groupId>c3p0</groupId>
+      <artifactId>c3p0</artifactId>
+      <version>0.9.1.2</version>
+    </dependency>
+    <dependency>
+      <groupId>mysql</groupId>
+      <artifactId>mysql-connector-java</artifactId>
+      <version>5.1.44</version>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>net.alchim31.maven</groupId>
+        <artifactId>scala-maven-plugin</artifactId>
+        <version>3.2.2</version>
+        <configuration>
+          <recompileMode>incremental</recompileMode>
+        </configuration>
+        <executions>
+          <execution>
+            <goals>
+              <goal>compile</goal>
+              <goal>testCompile</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-assembly-plugin</artifactId>
+        <version>2.4.1</version>
+
+        <configuration>
+          <!-- get all project dependencies -->
+          <descriptorRefs>
+            <descriptorRef>jar-with-dependencies</descriptorRef>
+          </descriptorRefs>
+          <!-- MainClass in mainfest make a executable jar -->
+          <!--<archive>-->
+          <!--<manifest>-->
+          <!--<addClasspath>true</addClasspath>-->
+          <!--　　　　　//主函数入口-->
+          <!--<mainClass>cn.piesat.spark.SparkStreamingKafka</mainClass>-->
+          <!--</manifest>-->
+          <!--</archive>-->
+        </configuration>
+
+        <executions>
+          <execution>
+            <id>make-assembly</id>
+            <!-- bind to the packaging phase -->
+            <phase>package</phase>
+            <goals>
+              <goal>single</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+
+二、代码
+连接序列化问题通过懒加载的方式解决，此代码不会因为每次发送数据时重新建立连接。
+1.创建一个KafkaSink类
+---------------------------------------------------------------------------------------
+package cn.piesat
+import java.util
+import org.apache.kafka.clients.producer.{KafkaProducer, ProducerRecord, RecordMetadata}
+
+class KafkaSink[K,V](createProducer:()=>KafkaProducer[K,V]) extends Serializable {
+  lazy val producer=createProducer()
+  def send(topic:String,key:K,value:V): util.concurrent.Future[RecordMetadata]=
+    producer.send(new ProducerRecord[K,V](topic,key,value))
+  def send(topic:String,value:V): util.concurrent.Future[RecordMetadata]=
+    producer.send(new ProducerRecord[K,V](topic,value))
+}
+
+object  KafkaSink{
+  import scala.collection.JavaConversions._
+  def apply[K,V](config:Map[String,Object]):KafkaSink[K,V]={
+    val createProducerFunc=()=>{
+      val producer=new KafkaProducer[K,V](config)
+      sys.addShutdownHook{
+        producer.close()
+      }
+      producer
+    }
+    new KafkaSink(createProducerFunc)
+  }
+  def apply[K,V](config:java.util.Properties):KafkaSink[K,V]=apply(config.toMap)
+}
+------------------------------------------------------------------------------
+
+
+2.创建一个任务入口类
+--------------------------------------------------------------------------------
+package cn.piesat
+
+import java.util.Properties
+
+import org.apache.spark.broadcast.Broadcast
+import org.apache.spark.{SparkConf, SparkContext}
+
+object SparkToKafka {
+
+    def main(args:Array[String])={
+      val conf=new SparkConf().setMaster("local[4]").set("spark.serializer", "org.apache.spark.serializer.KryoSerializer").setAppName("SparkToKafka")
+      val sc=new SparkContext(conf)
+      val kafkaProducer:Broadcast[KafkaSink[String,String]]={
+        val kafkaProducerConfig={
+          val p=new Properties()
+          p.setProperty("bootstrap.servers","hadoop01:9092")
+          p.setProperty("key.serializer","org.apache.kafka.common.serialization.StringSerializer")
+          p.setProperty("value.serializer","org.apache.kafka.common.serialization.StringSerializer")
+          p
+        }
+        sc.broadcast(KafkaSink[String,String](kafkaProducerConfig))
+      }
+      val worldRDD=sc.makeRDD(Array("abc","def"))
+      worldRDD.foreachPartition(rdd=>{
+        rdd.foreach(record=>{
+          kafkaProducer.value.send("lj03",record)
+        })
+      })
+
+    }
+}
