@@ -1,0 +1,86 @@
+参考官方文档：http://sqoop.apache.org/docs/1.4.6/SqoopUserGuide.html#_controlling_type_mapping
+
+7.2.11. Large Objects
+Sqoop handles large objects (BLOB and CLOB columns) in particular ways. If this data is truly large, then these columns should not be fully materialized in memory for manipulation, as most columns are. Instead, their data is handled in a streaming fashion. Large objects can be stored inline with the rest of the data, in which case they are fully materialized in memory on every access, or they can be stored in a secondary storage file linked to the primary data storage. By default, large objects less than 16 MB in size are stored inline with the rest of the data. At a larger size, they are stored in files in the _lobs subdirectory of the import target directory. These files are stored in a separate format optimized for large record storage, which can accomodate records of up to 2^63 bytes each. The size at which lobs spill into separate files is controlled by the --inline-lob-limit argument, which takes a parameter specifying the largest lob size to keep inline, in bytes. If you set the inline LOB limit to 0, all large objects will be placed in external storage.
+
+Table 6. Output line formatting arguments:
+
+Argument	Description
+--enclosed-by <char>	Sets a required field enclosing character
+--escaped-by <char>	Sets the escape character
+--fields-terminated-by <char>	Sets the field separator character
+--lines-terminated-by <char>	Sets the end-of-line character
+--mysql-delimiters	Uses MySQL’s default delimiter set: fields: , lines: \n escaped-by: \ optionally-enclosed-by: '
+--optionally-enclosed-by <char>	Sets a field enclosing character
+
+When importing to delimited files, the choice of delimiter is important. Delimiters which appear inside string-based fields may cause ambiguous parsing of the imported data by subsequent analysis passes. For example, the string "Hello, pleased to meet you" should not be imported with the end-of-field delimiter set to a comma.
+
+Delimiters may be specified as:
+
+a character (--fields-terminated-by X)
+an escape character (--fields-terminated-by \t). Supported escape characters are:
+
+\b (backspace)
+\n (newline)
+\r (carriage return)
+\t (tab)
+\" (double-quote)
+\\' (single-quote)
+\\ (backslash)
+\0 (NUL) - This will insert NUL characters between fields or lines, or will disable enclosing/escaping if used for one of the --enclosed-by, --optionally-enclosed-by, or --escaped-by arguments.
+The octal representation of a UTF-8 character’s code point. This should be of the form \0ooo, where ooo is the octal value. For example, --fields-terminated-by \001 would yield the ^A character.
+The hexadecimal representation of a UTF-8 character’s code point. This should be of the form \0xhhh, where hhh is the hex value. For example, --fields-terminated-by \0x10 would yield the carriage return character.
+The default delimiters are a comma (,) for fields, a newline (\n) for records, no quote character, and no escape character. Note that this can lead to ambiguous/unparsible records if you import database records containing commas or newlines in the field data. For unambiguous parsing, both must be enabled. For example, via --mysql-delimiters.
+
+If unambiguous delimiters cannot be presented, then use enclosing and escaping characters. The combination of (optional) enclosing and escaping characters will allow unambiguous parsing of lines. For example, suppose one column of a dataset contained the following values:
+
+Some string, with a comma.
+Another "string with quotes"
+The following arguments would provide delimiters which can be unambiguously parsed:
+
+$ sqoop import --fields-terminated-by , --escaped-by \\ --enclosed-by '\"' ...
+(Note that to prevent the shell from mangling the enclosing character, we have enclosed that argument itself in single-quotes.)
+
+The result of the above arguments applied to the above dataset would be:
+
+"Some string, with a comma.","1","2","3"...
+"Another \"string with quotes\"","4","5","6"...
+Here the imported strings are shown in the context of additional columns ("1","2","3", etc.) to demonstrate the full effect of enclosing and escaping. The enclosing character is only strictly necessary when delimiter characters appear in the imported text. The enclosing character can therefore be specified as optional:
+
+$ sqoop import --optionally-enclosed-by '\"' (the rest as above)...
+Which would result in the following import:
+
+"Some string, with a comma.",1,2,3...
+"Another \"string with quotes\"",4,5,6...
+[Note]	Note
+Even though Hive supports escaping characters, it does not handle escaping of new-line character. Also, it does not support the notion of enclosing characters that may include field delimiters in the enclosed string. It is therefore recommended that you choose unambiguous field and record-terminating delimiters without the help of escaping and enclosing characters when working with Hive; this is due to limitations of Hive’s input parsing abilities.
+
+The --mysql-delimiters argument is a shorthand argument which uses the default delimiters for the mysqldump program. If you use the mysqldump delimiters in conjunction with a direct-mode import (with --direct), very fast imports can be achieved.
+
+While the choice of delimiters is most important for a text-mode import, it is still relevant if you import to SequenceFiles with --as-sequencefile. The generated class' toString() method will use the delimiters you specify, so subsequent formatting of the output data will rely on the delimiters you choose.
+
+Table 7. Input parsing arguments:
+
+Argument	Description
+--input-enclosed-by <char>	Sets a required field encloser
+--input-escaped-by <char>	Sets the input escape character
+--input-fields-terminated-by <char>	Sets the input field separator
+--input-lines-terminated-by <char>	Sets the input end-of-line character
+--input-optionally-enclosed-by <char>	Sets a field enclosing character
+
+When Sqoop imports data to HDFS, it generates a Java class which can reinterpret the text files that it creates when doing a delimited-format import. The delimiters are chosen with arguments such as --fields-terminated-by; this controls both how the data is written to disk, and how the generated parse() method reinterprets this data. The delimiters used by the parse() method can be chosen independently of the output arguments, by using --input-fields-terminated-by, and so on. This is useful, for example, to generate classes which can parse records created with one set of delimiters, and emit the records to a different set of files using a separate set of delimiters.
+
+Table 8. Hive arguments:
+
+Argument	Description
+--hive-home <dir>	Override $HIVE_HOME
+--hive-import	Import tables into Hive (Uses Hive’s default delimiters if none are set.)
+--hive-overwrite	Overwrite existing data in the Hive table.
+--create-hive-table	If set, then the job will fail if the target hive
+table exits. By default this property is false.
+--hive-table <table-name>	Sets the table name to use when importing to Hive.
+--hive-drop-import-delims	Drops \n, \r, and \01 from string fields when importing to Hive.
+--hive-delims-replacement	Replace \n, \r, and \01 from string fields with user defined string when importing to Hive.
+--hive-partition-key	Name of a hive field to partition are sharded on
+--hive-partition-value <v>	String-value that serves as partition key for this imported into hive in this job.
+--map-column-hive <map>	Override default mapping from SQL type to Hive type for configured columns.
