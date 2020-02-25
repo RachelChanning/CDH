@@ -1,0 +1,30 @@
+[{
+"testStartTime": "2020-01-30 09:55:57",
+"testEndTime": "2020-01-30 09:55:59",
+"testResult": "passed",
+"testResultDescription": null,
+"isValueFlag": "Y",
+"testValue": "-71.722",
+"testItemNumber": "5ecce01b-7609-40cc-954e-fdf941d0284f",
+"testItemName": "Att1 / 0.3MHZ~1785MHZ",
+"testLowerLimit": -140,
+"testUpperLimit": -59,
+"subTestItemList":[
+{"testStartTime": "2019-09-28 03:33:25","testEndTime": "2019-09-28 03:33:25","testResult": "passed","testResultDescription": "passed","isValueFlag": "Y","testValue": "6.22","testSubitemNumber": "1","testSubitemName": "TXAOP","subTestLowerLimit": 4.8,"subTestUpperLimit": 6.3},
+{"testStartTime": "2019-09-28 03:33:25","testEndTime": "2019-09-28 03:33:25","testResult": "passed","testResultDescription": "passed","isValueFlag": "Y","testValue": "9.938258","testSubitemNumber": "2","testSubitemName": "TXER","subTestLowerLimit": 8.4,"subTestUpperLimit": 17}
+]},{
+"testStartTime": "2020-01-30 09:55:57",
+"testEndTime": "2020-01-30 09:55:59",
+"testResult": "passed",
+"testResultDescription": null,
+"isValueFlag": "Y",
+"testValue": "-74.567",
+"testItemNumber": "144ec92e-3188-4c2c-b90a-9eedd355dc56",
+"testItemName": "Att2 / 1785MHZ~2195MHZ",
+"testLowerLimit": -140,
+"testUpperLimit": -71,
+"subTestItemList":[
+{"testStartTime": "2019-09-28 03:33:25","testEndTime": "2019-09-28 03:33:25","testResult": "passed","testResultDescription": "passed","isValueFlag": "Y","testValue": "6.22","testSubitemNumber": "1","testSubitemName": "TXAOP","subTestLowerLimit": 4.8,"subTestUpperLimit": 6.3},
+{"testStartTime": "2019-09-28 03:33:25","testEndTime": "2019-09-28 03:33:25","testResult": "passed","testResultDescription": "passed","isValueFlag": "Y","testValue": "9.938258","testSubitemNumber": "2","testSubitemName": "TXER","subTestLowerLimit": 8.4,"subTestUpperLimit": 17}
+]
+}]
