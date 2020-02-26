@@ -1,0 +1,308 @@
+package com.huawei
+
+import java.io.IOException
+import java.util
+
+import com.alibaba.fastjson.JSONArray
+import com.esotericsoftware.kryo.Kryo
+import org.apache.hadoop.hbase.{CellUtil, HBaseConfiguration, TableName}
+import org.apache.hadoop.hbase.client._
+import org.apache.hadoop.hbase.io.ImmutableBytesWritable
+import org.apache.hadoop.hbase.mapreduce.TableInputFormat
+import org.apache.hadoop.hbase.protobuf.ProtobufUtil
+import org.apache.hadoop.hbase.util.{Base64, Bytes}
+import org.apache.spark.rdd.RDD
+import org.apache.spark.{SparkConf, SparkContext}
+import org.apache.spark.serializer.KryoRegistrator
+
+/**
+  * Title: SparkReadHbaseToHive 
+  * Author: hwx763490
+  * Date: 2020-02-25 9:28
+  * Version: v1.0
+  * Description:
+  **/
+object SparkReadHbaseToHive {
+
+  def main(args: Array[String]) {
+    // 开始执行时间
+    val startTime = System.currentTimeMillis()
+
+    val conf = new SparkConf().setAppName("SparkHbaseToHive")
+    conf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+    conf.set("spark.kryo.registrator", "com.huawei.MyRegistrator")
+    val sc = new SparkContext(conf)
+    sc.setLogLevel("Warn")
+
+    // Create the configuration parameter to connect the HBase.
+    val hbConf = HBaseConfiguration.create(sc.hadoopConfiguration)
+    hbConf.set("hbase.zookeeper.property.clientPort", "24002")
+    hbConf.set("hbase.zookeeper.quorum", "dggiocfi001-mg,dggiocfi002-mg,dggiocfi003-mg,dggiocfi004-mg")
+
+    // Declare the information of the table to be queried.
+    val scan = new Scan()
+    // colomn family
+    scan.addFamily(Bytes.toBytes("SIMW_TEST_DATA_HEADER"))
+    scan.addFamily(Bytes.toBytes("SIMW_TEST_DATA_ITEMS"))
+
+    //扫描的表rowkey 的开始和结束
+    scan.setStartRow("13040213 CQK10922293".getBytes)
+    scan.setStopRow("13040213 CQK10985696".getBytes)
+    //val list = new FilterList(Operator.MUST_PASS_ALL)
+    //val filter1 = new RowFilter(CompareOp.GREATER_OR_EQUAL,new LongComparator(1991))
+    //val filter2 = new RowFilter(CompareOp.LESS_OR_EQUAL,new RegexStringComparator("3000*"))
+
+    // list.addFilter(filter1)
+    // list.addFilter(filter2)
+    //scan.setFilter(list)
+
+    val proto = ProtobufUtil.toScan(scan)
+    val scanToString = Base64.encodeBytes(proto.toByteArray)
+    // table name
+    hbConf.set(TableInputFormat.INPUT_TABLE, "SIMW_TEST_DATA")
+    hbConf.set(TableInputFormat.SCAN, scanToString)
+
+    //  Obtain the data in the table through the Spark interface.
+    val hBaseRDD = sc.newAPIHadoopRDD(hbConf, classOf[TableInputFormat], classOf[ImmutableBytesWritable], classOf[Result])
+    val count = hBaseRDD.count()
+    println(count)
+    // Traverse every Partition in the HBase table1 and insert into the Hive table
+    val value = hBaseRDD.map(result => {
+      val row_key = Bytes.toString(result._2.getRow)
+      // 通过列族和列名获取列值
+      val created_by = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "CREATED_BY".getBytes))
+      val created_by_account = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "CREATED_BY_ACCOUNT".getBytes))
+      val creation_date = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "CREATION_DATE".getBytes))
+      val date_code = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "DATE_CODE".getBytes))
+      val description = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "DESCRIPTION".getBytes))
+
+      val factory_code = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "FACTORY_CODE".getBytes))
+      val fixture_unique_number = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "FIXTURE_UNIQUE_NUMBER".getBytes))
+      val last_updated_by = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "LAST_UPDATED_BY".getBytes))
+      val last_updated_by_account = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "LAST_UPDATED_BY_ACCOUNT".getBytes))
+      val last_update_date = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "LAST_UPDATE_DATE".getBytes))
+
+      val last_update_version = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "LAST_UPDATE_VERSION".getBytes))
+      val lot_code = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "LOT_CODE".getBytes))
+      val material_code = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "MATERIAL_CODE".getBytes))
+      val material_color = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "MATERIAL_COLOR".getBytes))
+      val material_mould = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "MATERIAL_MOULD".getBytes))
+      val material_mould_cavity = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "MATERIAL_MOULD_CAVITY".getBytes))
+      val material_serial_number = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "MATERIAL_SERIAL_NUMBER".getBytes))
+      val operator = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "OPERATOR".getBytes))
+      val order_number = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "ORDER_NUMBER".getBytes))
+      val product_line = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "PRODUCT_LINE".getBytes))
+      val supplier_code = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "SUPPLIER_CODE".getBytes))
+      val test_data_header_id = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "TEST_DATA_HEADER_ID".getBytes))
+
+      val test_data_quality_warning = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "TEST_DATA_QUALITY_WARNING".getBytes))
+      val test_device_name = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "TEST_DEVICE_NAME".getBytes))
+      val test_end_time = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "TEST_END_TIME".getBytes))
+      val test_object_type = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "TEST_OBJECT_TYPE".getBytes))
+      val test_program_name = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "TEST_PROGRAM_NAME".getBytes))
+      val test_program_version = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "TEST_PROGRAM_VERSION".getBytes))
+      val test_result = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "TEST_RESULT".getBytes))
+      val test_sequence = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "TEST_SEQUENCE".getBytes))
+
+      val test_start_time = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "TEST_START_TIME".getBytes))
+      val test_station = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "TEST_STATION".getBytes))
+      val upload_type = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "UPLOAD_TYPE".getBytes))
+      val workshop = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_HEADER".getBytes, "WORKSHOP".getBytes))
+
+      // 解析test_item_data_list Json字符串
+      val test_item_data_list = Bytes.toString(result._2.getValue("SIMW_TEST_DATA_ITEMS".getBytes, "TEST_ITEM_DATA_LIST".getBytes))
+      val array: JSONArray = JsonUtils.parseJson(test_item_data_list)
+      val str_list = array.toString()
+      (row_key, created_by, created_by_account, creation_date, date_code, description, factory_code, fixture_unique_number, last_updated_by,
+        last_updated_by_account, last_update_date, last_update_version, lot_code, material_code, material_color, material_mould, material_mould_cavity,
+        material_serial_number, operator, order_number, product_line, supplier_code, test_data_header_id, test_data_quality_warning, test_device_name,
+        test_end_time, test_object_type, test_program_name, test_program_version, test_result, test_sequence, test_start_time, test_station, upload_type, workshop,str_list)
+    })
+
+    value.saveAsTextFile("hdfs:///tenant/eyeinsight_769/temp/SIMW_TEST_DATA")
+    val endTime = System.currentTimeMillis()
+    println("运行时间:" + (endTime - startTime) / 1000 / 60 + "分钟")
+    // 运行结束，关闭sc
+    sc.stop()
+  }
+
+  /**
+    * Define serializer class.
+    */
+  class MyRegistrator extends KryoRegistrator {
+    override def registerClasses(kryo: Kryo) {
+      kryo.register(classOf[org.apache.hadoop.hbase.io.ImmutableBytesWritable])
+      kryo.register(classOf[org.apache.hadoop.hbase.client.Result])
+      kryo.register(classOf[Array[(Any, Any)]])
+      kryo.register(classOf[Array[org.apache.hadoop.hbase.Cell]])
+      kryo.register(classOf[org.apache.hadoop.hbase.NoTagsKeyValue])
+      kryo.register(classOf[org.apache.hadoop.hbase.protobuf.generated.ClientProtos.RegionLoadStats])
+    }
+  }
+}
+
+
+
+
+
+
+
+
+package com.huawei
+
+import java.util
+import scala.collection.JavaConversions._
+import com.alibaba.fastjson.{JSON, JSONArray, JSONObject}
+import com.alibaba.fastjson.serializer.SerializerFeature
+
+/**
+  * Title: JsonTest 
+  * Author: hwx763490
+  * Date: 2020-02-24 21:43
+  * Version: v1.0
+  * Description:
+  **/
+object JsonUtils {
+  def main(args: Array[String]): Unit = {
+    val test_item_data_list =
+      """
+        |[{
+        |"testStartTime": "2020-01-30 09:55:57",
+        |"testEndTime": "2020-01-30 09:55:59",
+        |"testResult": "passed",
+        |"testResultDescription": null,
+        |"isValueFlag": "Y",
+        |"testValue": "-71.722",
+        |"testItemNumber": "5ecce01b-7609-40cc-954e-fdf941d0284f",
+        |"testItemName": "Att1 / 0.3MHZ~1785MHZ",
+        |"testLowerLimit": -140,
+        |"testUpperLimit": -59,
+        |"subTestItemList":[
+        |{"testStartTime": "2019-09-28 03:33:25","testEndTime": "2019-09-28 03:33:25","testResult": "passed","testResultDescription": "passed","isValueFlag": "Y","testValue": "6.22","testSubitemNumber": "1","testSubitemName": "TXAOP","subTestLowerLimit": 4.8,"subTestUpperLimit": 6.3},
+        |{"testStartTime": "2019-09-28 03:33:25","testEndTime": "2019-09-28 03:33:25","testResult": "passed","testResultDescription": "passed","isValueFlag": "Y","testValue": "9.938258","testSubitemNumber": "2","testSubitemName": "TXER","subTestLowerLimit": 8.4,"subTestUpperLimit": 17}
+        |]},{
+        |"testStartTime": "2020-01-30 09:55:57",
+        |"testEndTime": "2020-01-30 09:55:59",
+        |"testResult": "passed",
+        |"testResultDescription": null,
+        |"isValueFlag": "Y",
+        |"testValue": "-74.567",
+        |"testItemNumber": "144ec92e-3188-4c2c-b90a-9eedd355dc56",
+        |"testItemName": "Att2 / 1785MHZ~2195MHZ",
+        |"testLowerLimit": -140,
+        |"testUpperLimit": -71,
+        |"subTestItemList":[
+        |{"testStartTime": "2019-09-28 03:33:25","testEndTime": "2019-09-28 03:33:25","testResult": "passed","testResultDescription": "passed","isValueFlag": "Y","testValue": "6.22","testSubitemNumber": "1","testSubitemName": "TXAOP","subTestLowerLimit": 4.8,"subTestUpperLimit": 6.3},
+        |{"testStartTime": "2019-09-28 03:33:25","testEndTime": "2019-09-28 03:33:25","testResult": "passed","testResultDescription": "passed","isValueFlag": "Y","testValue": "9.938258","testSubitemNumber": "2","testSubitemName": "TXER","subTestLowerLimit": 8.4,"subTestUpperLimit": 17}
+        |]
+        |}]
+      """.stripMargin
+    parseJson(test_item_data_list)
+
+  }
+
+  def parseJson(str: String): JSONArray = {
+    val array = new JSONArray()
+
+    val jsonArray: JSONArray = JSON.parseArray(str)
+    for (jsonElement <- jsonArray) {
+      val stringToObject = new util.LinkedHashMap[String, Object]()
+
+      val testStartTime_obj = jsonElement.asInstanceOf[JSONObject].get("testStartTime")
+      val testStartTime: String = JSON.toJSONString(testStartTime_obj, SerializerFeature.WriteMapNullValue).replace("\"", "")
+      stringToObject.put("testStartTime", testStartTime)
+
+      val testEndTime_obj = jsonElement.asInstanceOf[JSONObject].get("testEndTime")
+      val testEndTime: String = JSON.toJSONString(testEndTime_obj, SerializerFeature.WriteMapNullValue).replace("\"", "")
+      stringToObject.put("testEndTime", testEndTime)
+
+      val testResult_obj = jsonElement.asInstanceOf[JSONObject].get("testResult")
+      val testResult: String = JSON.toJSONString(testResult_obj, SerializerFeature.WriteMapNullValue).replace("\"", "")
+      stringToObject.put("testResult", testResult)
+
+      val testResultDescription_obj = jsonElement.asInstanceOf[JSONObject].get("testResultDescription")
+      val testResultDescription: String = JSON.toJSONString(testResultDescription_obj, SerializerFeature.WriteMapNullValue).replace("\"", "")
+      stringToObject.put("testResultDescription", testResultDescription)
+
+      val isValueFlag_obj = jsonElement.asInstanceOf[JSONObject].get("isValueFlag")
+      val isValueFlag: String = JSON.toJSONString(isValueFlag_obj, SerializerFeature.WriteMapNullValue).replace("\"", "")
+      stringToObject.put("isValueFlag", isValueFlag)
+
+      val testValue_obj = jsonElement.asInstanceOf[JSONObject].get("testValue")
+      val testValue: String = JSON.toJSONString(testValue_obj, SerializerFeature.WriteMapNullValue).replace("\"", "")
+      stringToObject.put("testValue", testValue)
+
+      val testItemNumber_obj = jsonElement.asInstanceOf[JSONObject].get("testItemNumber")
+      val testItemNumber: String = JSON.toJSONString(testItemNumber_obj, SerializerFeature.WriteMapNullValue).replace("\"", "")
+      stringToObject.put("testItemNumber", testItemNumber)
+
+      val testItemName_obj = jsonElement.asInstanceOf[JSONObject].get("testItemName")
+      val testItemName: String = JSON.toJSONString(testItemName_obj, SerializerFeature.WriteMapNullValue).replace("\"", "")
+      stringToObject.put("testItemName", testItemName)
+
+      val testLowerLimit_obj = jsonElement.asInstanceOf[JSONObject].get("testLowerLimit")
+      val testLowerLimit: String = JSON.toJSONString(testLowerLimit_obj, SerializerFeature.WriteMapNullValue).replace("\"", "")
+      stringToObject.put("testLowerLimit", testLowerLimit)
+
+      val testUpperLimit_obj = jsonElement.asInstanceOf[JSONObject].get("testUpperLimit")
+      val testUpperLimit: String = JSON.toJSONString(testUpperLimit_obj, SerializerFeature.WriteMapNullValue).replace("\"", "")
+      stringToObject.put("testUpperLimit", testUpperLimit)
+
+      val subTestItemList_obj = jsonElement.asInstanceOf[JSONObject].get("subTestItemList")
+      val subTestItemList: String = JSON.toJSONString(subTestItemList_obj, SerializerFeature.WriteMapNullValue)
+
+      val jsonArray2: JSONArray = JSON.parseArray(subTestItemList)
+
+      for (jsonElement2 <- jsonArray2) {
+
+        val json2 = new util.LinkedHashMap[String, Object]()
+        json2.putAll(stringToObject)
+
+        val subtestStartTime_obj = jsonElement2.asInstanceOf[JSONObject].get("testStartTime")
+        val subtestStartTime: String = JSON.toJSONString(subtestStartTime_obj, SerializerFeature.WriteMapNullValue).replace("\"", "")
+        json2.put("subtestStartTime", subtestStartTime)
+
+        val subtestEndTime_obj = jsonElement2.asInstanceOf[JSONObject].get("testEndTime")
+        val subtestEndTime: String = JSON.toJSONString(subtestEndTime_obj, SerializerFeature.WriteMapNullValue).replace("\"", "")
+        json2.put("subtestEndTime", subtestEndTime)
+
+        val subtestResult_obj = jsonElement2.asInstanceOf[JSONObject].get("testResult")
+        val subtestResult: String = JSON.toJSONString(subtestResult_obj, SerializerFeature.WriteMapNullValue).replace("\"", "")
+        json2.put("subtestResult", subtestResult)
+
+        val subtestResultDescription_obj = jsonElement2.asInstanceOf[JSONObject].get("testResultDescription")
+        val subtestResultDescription: String = JSON.toJSONString(subtestResultDescription_obj, SerializerFeature.WriteMapNullValue).replace("\"", "")
+        json2.put("subtestResultDescription", subtestResultDescription)
+
+        val subisValueFlag_obj = jsonElement2.asInstanceOf[JSONObject].get("isValueFlag")
+        val subisValueFlag: String = JSON.toJSONString(subisValueFlag_obj, SerializerFeature.WriteMapNullValue).replace("\"", "")
+        json2.put("subisValueFlag", subisValueFlag)
+
+        val subtestValue_obj = jsonElement2.asInstanceOf[JSONObject].get("testValue")
+        val subtestValue: String = JSON.toJSONString(subtestValue_obj, SerializerFeature.WriteMapNullValue).replace("\"", "")
+        json2.put("subtestValue", subtestValue)
+
+        val testSubitemNumber_obj = jsonElement2.asInstanceOf[JSONObject].get("testSubitemNumber")
+        val testSubitemNumber: String = JSON.toJSONString(testSubitemNumber_obj, SerializerFeature.WriteMapNullValue).replace("\"", "")
+        json2.put("testSubitemNumber", testSubitemNumber)
+
+        val testSubitemName_obj = jsonElement2.asInstanceOf[JSONObject].get("testSubitemName")
+        val testSubitemName: String = JSON.toJSONString(testSubitemName_obj, SerializerFeature.WriteMapNullValue).replace("\"", "")
+        json2.put("testSubitemName", testSubitemName)
+
+        val subTestLowerLimit_obj = jsonElement2.asInstanceOf[JSONObject].get("subTestLowerLimit")
+        val subTestLowerLimit: String = JSON.toJSONString(subTestLowerLimit_obj, SerializerFeature.WriteMapNullValue).replace("\"", "")
+        json2.put("subTestLowerLimit", subTestLowerLimit)
+
+        val subTestUpperLimit_obj = jsonElement2.asInstanceOf[JSONObject].get("subTestUpperLimit")
+        val subTestUpperLimit: String = JSON.toJSONString(subTestUpperLimit_obj, SerializerFeature.WriteMapNullValue).replace("\"", "")
+        json2.put("subTestUpperLimit", subTestUpperLimit)
+
+        val nObject = new JSONObject(json2)
+        array.add(nObject)
+        // array.add(json2)
+      }
+    }
+    array
+  }
+}
